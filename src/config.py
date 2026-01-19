@@ -57,7 +57,7 @@ class Config:
     def __init__(self):
         self.newsapi_key = os.getenv("NEWSAPI_KEY", "")
         self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        self.sendgrid_api_key = os.getenv("SENDGRID_API_KEY", "")
+        self.resend_api_key = os.getenv("RESEND_API_KEY", "")
         self.email_to = os.getenv("EMAIL_TO", "")
         self.email_from = os.getenv("EMAIL_FROM", "")
 
@@ -78,8 +78,8 @@ class Config:
             missing.append("NEWSAPI_KEY")
         if not self.anthropic_api_key:
             missing.append("ANTHROPIC_API_KEY")
-        if not self.sendgrid_api_key:
-            missing.append("SENDGRID_API_KEY")
+        if not self.resend_api_key:
+            missing.append("RESEND_API_KEY")
         if not self.email_to:
             missing.append("EMAIL_TO")
         if not self.email_from:

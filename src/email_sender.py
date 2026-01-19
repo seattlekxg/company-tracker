@@ -1,18 +1,17 @@
-"""SendGrid email sending integration."""
+"""Resend email sending integration."""
 
 import os
 from datetime import date
 from typing import Optional
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, Email, To, Content, HtmlContent
+import resend
 
 from .config import Company, config
 from .storage import FinancialSnapshot, NewsArticle
 
 
 class EmailSender:
-    """Sends email digests via SendGrid."""
+    """Sends email digests via Resend."""
 
     def __init__(
         self,
@@ -20,18 +19,18 @@ class EmailSender:
         from_email: Optional[str] = None,
         to_email: Optional[str] = None
     ):
-        self.api_key = api_key or config.sendgrid_api_key
+        self.api_key = api_key or config.resend_api_key
         self.from_email = from_email or config.email_from
         self.to_email = to_email or config.email_to
 
         if not self.api_key:
-            raise ValueError("SendGrid API key is required")
+            raise ValueError("Resend API key is required")
         if not self.from_email:
             raise ValueError("From email address is required")
         if not self.to_email:
             raise ValueError("To email address is required")
 
-        self.client = SendGridAPIClient(api_key=self.api_key)
+        resend.api_key = self.api_key
 
     def _load_template(self) -> str:
         """Load the HTML email template."""
@@ -211,18 +210,15 @@ class EmailSender:
         html_content = html_content.replace("{{SUMMARY}}", f"<h2>Executive Summary</h2>{summary_html}")
         html_content = html_content.replace("{{COMPANY_DETAILS}}", f"<h2>Company Details</h2>{company_details}")
 
-        # Create email
-        message = Mail(
-            from_email=self.from_email,
-            to_emails=self.to_email,
-            subject=f"Daily Company Briefing - {target_date.strftime('%B %d, %Y')}",
-            html_content=html_content
-        )
-
         try:
-            response = self.client.send(message)
-            print(f"Email sent successfully. Status code: {response.status_code}")
-            return response.status_code in [200, 201, 202]
+            response = resend.Emails.send({
+                "from": self.from_email,
+                "to": [self.to_email],
+                "subject": f"Daily Company Briefing - {target_date.strftime('%B %d, %Y')}",
+                "html": html_content
+            })
+            print(f"Email sent successfully. ID: {response['id']}")
+            return True
         except Exception as e:
             print(f"Error sending email: {e}")
             return False
