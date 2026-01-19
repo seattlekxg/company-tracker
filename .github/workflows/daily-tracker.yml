@@ -13,6 +13,9 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: write
+
 jobs:
   track:
     runs-on: ubuntu-latest
