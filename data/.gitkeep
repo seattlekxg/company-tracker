@@ -1,0 +1,2 @@
+# This file ensures the data directory is tracked by git
+# The tracker.db file will be auto-created when the tracker runs

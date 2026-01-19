@@ -1,0 +1,11 @@
+# API clients
+requests>=2.31.0
+yfinance>=0.2.36
+anthropic>=0.18.0
+sendgrid>=6.11.0
+
+# Database
+# sqlite3 is built into Python
+
+# Utilities
+python-dotenv>=1.0.0

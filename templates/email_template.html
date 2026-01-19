@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Company Briefing</title>
+    <style>
+        /* Reset */
+        body, p, h1, h2, h3, h4, ul, li {
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Base styles */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #2d3748;
+            background-color: #f7fafc;
+        }
+
+        /* Container */
+        .container {
+            max-width: 650px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 12px 12px 0 0;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .header .date {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .header .icon {
+            font-size: 40px;
+            margin-bottom: 10px;
+        }
+
+        /* Main content */
+        .content {
+            background: white;
+            padding: 30px;
+            border: 1px solid #e2e8f0;
+            border-top: none;
+        }
+
+        /* Section headers */
+        h2 {
+            color: #1a365d;
+            font-size: 20px;
+            font-weight: 600;
+            margin: 25px 0 15px 0;
+            padding-bottom: 8px;
+            border-bottom: 3px solid #3182ce;
+        }
+
+        h2:first-child {
+            margin-top: 0;
+        }
+
+        h3 {
+            color: #2d3748;
+            font-size: 16px;
+            font-weight: 600;
+            margin: 15px 0 10px 0;
+        }
+
+        h4 {
+            color: #4a5568;
+            font-size: 14px;
+            font-weight: 600;
+            margin: 12px 0 8px 0;
+        }
+
+        /* Paragraphs */
+        p {
+            margin-bottom: 12px;
+            color: #4a5568;
+        }
+
+        /* Company cards */
+        .company-card {
+            background: #f7fafc;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 8px;
+            border-left: 4px solid #3182ce;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .company-card h3 {
+            color: #1a365d;
+            margin-top: 0;
+            margin-bottom: 12px;
+            font-size: 18px;
+        }
+
+        .company-card p {
+            margin-bottom: 8px;
+        }
+
+        /* Price indicators */
+        .price-up {
+            color: #38a169;
+            font-weight: 600;
+        }
+
+        .price-down {
+            color: #e53e3e;
+            font-weight: 600;
+        }
+
+        /* Lists */
+        ul {
+            padding-left: 20px;
+            margin: 10px 0;
+        }
+
+        li {
+            margin-bottom: 8px;
+            color: #4a5568;
+        }
+
+        /* Links */
+        a {
+            color: #3182ce;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* Stats row */
+        .stats-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin: 15px 0;
+        }
+
+        .stat-item {
+            background: white;
+            padding: 12px 16px;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+            min-width: 120px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #718096;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        /* Emphasis boxes */
+        .highlight-box {
+            background: #ebf8ff;
+            border: 1px solid #90cdf4;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+
+        .warning-box {
+            background: #fffaf0;
+            border: 1px solid #fbd38d;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            color: #718096;
+            font-size: 12px;
+            padding: 25px;
+            background: #edf2f7;
+            border-radius: 0 0 12px 12px;
+            border: 1px solid #e2e8f0;
+            border-top: none;
+        }
+
+        .footer p {
+            margin-bottom: 8px;
+            color: #718096;
+        }
+
+        .footer a {
+            color: #4a5568;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+
+            .header {
+                padding: 20px;
+            }
+
+            .header h1 {
+                font-size: 22px;
+            }
+
+            .content {
+                padding: 20px;
+            }
+
+            .stats-row {
+                flex-direction: column;
+            }
+        }
+
+        /* Strong/emphasis in content */
+        strong {
+            color: #2d3748;
+        }
+
+        em {
+            color: #718096;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="icon">&#128200;</div>
+            <h1>Daily Company Briefing</h1>
+            <p class="date">{{DATE}}</p>
+        </div>
+
+        <div class="content">
+            {{SUMMARY}}
+
+            {{COMPANY_DETAILS}}
+        </div>
+
+        <div class="footer">
+            <p>This report was generated automatically by Company Tracker.</p>
+            <p>Powered by NewsAPI, Yahoo Finance, and Claude AI</p>
+        </div>
+    </div>
+</body>
+</html>
