@@ -88,7 +88,8 @@ class EmailSender:
         self,
         company: Company,
         articles: list[NewsArticle],
-        snapshot: Optional[FinancialSnapshot]
+        snapshot: Optional[FinancialSnapshot],
+        filings: list = None
     ) -> str:
         """Format a company's data as HTML."""
         html = f'<div class="company-card">'
@@ -115,6 +116,21 @@ class EmailSender:
                 else:
                     cap_str = f"${cap / 1_000_000:.2f}M"
                 html += f'<p><strong>Market Cap:</strong> {cap_str}</p>'
+
+        # SEC Filings
+        if filings:
+            html += f'<p><strong>SEC Filings:</strong> {len(filings)} recent filing(s)</p>'
+            html += '<ul>'
+            for filing in filings[:3]:  # Top 3 filings
+                filed_date = filing.filed_at.strftime("%Y-%m-%d") if filing.filed_at else ""
+                html += f'<li><a href="{filing.filing_url}">{filing.form_type}</a> ({filed_date})'
+                if filing.content_summary:
+                    summary_preview = filing.content_summary[:150]
+                    if len(filing.content_summary) > 150:
+                        summary_preview += "..."
+                    html += f'<br><em style="font-size: 0.9em; color: #666;">{summary_preview}</em>'
+                html += '</li>'
+            html += '</ul>'
 
         # News
         html += f'<p><strong>News:</strong> {len(articles)} article(s)</p>'
@@ -179,7 +195,8 @@ class EmailSender:
         companies: list[Company],
         articles_by_company: dict[str, list[NewsArticle]],
         snapshots_by_company: dict[str, Optional[FinancialSnapshot]],
-        target_date: date
+        filings_by_company: dict[str, list] = None,
+        target_date: date = None
     ) -> bool:
         """Send the daily digest email.
 
@@ -188,11 +205,15 @@ class EmailSender:
             companies: List of companies.
             articles_by_company: Dict mapping company name to articles.
             snapshots_by_company: Dict mapping company name to financial snapshot.
+            filings_by_company: Dict mapping company name to SEC filings.
             target_date: The date for this digest.
 
         Returns:
             True if email was sent successfully.
         """
+        if filings_by_company is None:
+            filings_by_company = {}
+
         template = self._load_template()
 
         # Format summary
@@ -203,7 +224,8 @@ class EmailSender:
         for company in companies:
             articles = articles_by_company.get(company.name, [])
             snapshot = snapshots_by_company.get(company.name)
-            company_details += self._format_company_html(company, articles, snapshot)
+            filings = filings_by_company.get(company.name, [])
+            company_details += self._format_company_html(company, articles, snapshot, filings)
 
         # Fill template
         html_content = template.replace("{{DATE}}", target_date.strftime("%B %d, %Y"))

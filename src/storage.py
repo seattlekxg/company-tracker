@@ -48,6 +48,20 @@ class DailySummary:
     created_at: Optional[datetime] = None
 
 
+@dataclass
+class SECFilingRecord:
+    """Represents an SEC filing record in the database."""
+    id: Optional[int]
+    company_id: int
+    form_type: str
+    filed_at: datetime
+    accession_number: str
+    filing_url: str
+    description: Optional[str]
+    content_summary: Optional[str]
+    fetched_at: Optional[datetime] = None
+
+
 class Storage:
     """SQLite storage handler."""
 
@@ -111,9 +125,23 @@ class Storage:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS sec_filings (
+                id INTEGER PRIMARY KEY,
+                company_id INTEGER REFERENCES companies(id),
+                form_type TEXT NOT NULL,
+                filed_at TIMESTAMP,
+                accession_number TEXT UNIQUE,
+                filing_url TEXT,
+                description TEXT,
+                content_summary TEXT,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_news_company ON news_articles(company_id);
             CREATE INDEX IF NOT EXISTS idx_news_published ON news_articles(published_at);
             CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_snapshots(date);
+            CREATE INDEX IF NOT EXISTS idx_sec_company ON sec_filings(company_id);
+            CREATE INDEX IF NOT EXISTS idx_sec_filed ON sec_filings(filed_at);
         """)
 
         conn.commit()
@@ -382,3 +410,88 @@ class Storage:
             created_at=datetime.fromisoformat(row["created_at"])
                 if row["created_at"] else None
         )
+
+    def save_sec_filing(self, filing) -> bool:
+        """Save an SEC filing if it doesn't already exist.
+
+        Args:
+            filing: SECFiling object from sec_fetcher.
+
+        Returns:
+            True if filing was saved, False if it was a duplicate.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO sec_filings
+                    (company_id, form_type, filed_at, accession_number,
+                     filing_url, description, content_summary)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    filing.company_id,
+                    filing.form_type,
+                    filing.filed_at.isoformat() if filing.filed_at else None,
+                    filing.accession_number,
+                    filing.filing_url,
+                    filing.description,
+                    filing.content_summary
+                )
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Duplicate accession number
+            return False
+        finally:
+            conn.close()
+
+    def get_sec_filings_by_date(
+        self,
+        target_date: date,
+        company_id: Optional[int] = None
+    ) -> list[SECFilingRecord]:
+        """Get SEC filings fetched on a specific date."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        if company_id:
+            cursor.execute(
+                """
+                SELECT * FROM sec_filings
+                WHERE date(fetched_at) = ? AND company_id = ?
+                ORDER BY filed_at DESC
+                """,
+                (target_date.isoformat(), company_id)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM sec_filings
+                WHERE date(fetched_at) = ?
+                ORDER BY filed_at DESC
+                """,
+                (target_date.isoformat(),)
+            )
+
+        filings = []
+        for row in cursor.fetchall():
+            filings.append(SECFilingRecord(
+                id=row["id"],
+                company_id=row["company_id"],
+                form_type=row["form_type"],
+                filed_at=datetime.fromisoformat(row["filed_at"])
+                    if row["filed_at"] else None,
+                accession_number=row["accession_number"],
+                filing_url=row["filing_url"],
+                description=row["description"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return filings
