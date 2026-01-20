@@ -6,6 +6,7 @@ from datetime import date
 
 from .config import COMPANIES, config
 from .email_sender import EmailSender
+from .events_fetcher import EventsFetcher
 from .finance_fetcher import FinanceFetcher
 from .news_fetcher import NewsFetcher
 from .sec_fetcher import SECFetcher
@@ -35,20 +36,21 @@ def run_tracker(dry_run: bool = False) -> bool:
         return False
 
     # Initialize components
-    print("\n[1/7] Initializing...")
+    print("\n[1/8] Initializing...")
     storage = Storage()
     news_fetcher = NewsFetcher()
     finance_fetcher = FinanceFetcher()
     sec_fetcher = SECFetcher()
+    events_fetcher = EventsFetcher()
     summarizer = Summarizer()
 
     # Sync companies to database
-    print("\n[2/7] Syncing companies to database...")
+    print("\n[2/8] Syncing companies to database...")
     company_ids = storage.sync_companies(COMPANIES)
     print(f"  Tracking {len(company_ids)} companies")
 
     # Fetch news
-    print("\n[3/7] Fetching news articles...")
+    print("\n[3/8] Fetching news articles...")
     articles_by_company = news_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids,
@@ -65,7 +67,7 @@ def run_tracker(dry_run: bool = False) -> bool:
     print(f"  Saved {total_new} new articles to database")
 
     # Fetch financial data
-    print("\n[4/7] Fetching financial data...")
+    print("\n[4/8] Fetching financial data...")
     snapshots_by_company = finance_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids
@@ -78,7 +80,7 @@ def run_tracker(dry_run: bool = False) -> bool:
     print("  Saved financial snapshots to database")
 
     # Fetch SEC filings
-    print("\n[5/7] Fetching SEC filings...")
+    print("\n[5/8] Fetching SEC filings...")
     filings_by_company = sec_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids,
@@ -104,8 +106,12 @@ def run_tracker(dry_run: bool = False) -> bool:
 
     print(f"  Processed {total_filings} new SEC filings")
 
+    # Fetch upcoming events
+    print("\n[6/8] Fetching upcoming events...")
+    events_by_company = events_fetcher.fetch_all_companies(COMPANIES)
+
     # Generate AI summary
-    print("\n[6/7] Generating AI summary...")
+    print("\n[7/8] Generating AI summary...")
     summary_text = summarizer.generate_summary(
         COMPANIES,
         articles_by_company,
@@ -133,9 +139,9 @@ def run_tracker(dry_run: bool = False) -> bool:
 
     # Send email
     if dry_run:
-        print("\n[7/7] Dry run mode - skipping email")
+        print("\n[8/8] Dry run mode - skipping email")
     else:
-        print("\n[7/7] Sending email digest...")
+        print("\n[8/8] Sending email digest...")
         email_sender = EmailSender()
         if email_sender.send_daily_digest(
             summary_text,
@@ -143,6 +149,7 @@ def run_tracker(dry_run: bool = False) -> bool:
             articles_by_company,
             snapshots_by_company,
             filings_by_company,
+            events_by_company,
             date.today()
         ):
             storage.mark_summary_email_sent(date.today())

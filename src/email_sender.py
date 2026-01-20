@@ -146,6 +146,50 @@ class EmailSender:
         html += '</div>'
         return html
 
+    def _format_events_matrix(self, events_by_company: dict) -> str:
+        """Format upcoming events as an HTML table."""
+        html = '''
+        <h2>Upcoming Events</h2>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+            <thead>
+                <tr style="background-color: #1a365d; color: white;">
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Company</th>
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Date</th>
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Description</th>
+                </tr>
+            </thead>
+            <tbody>
+        '''
+
+        row_colors = ['#ffffff', '#f7fafc']
+        row_idx = 0
+
+        for company_name, event in events_by_company.items():
+            bg_color = row_colors[row_idx % 2]
+            row_idx += 1
+
+            if event and event.event_date:
+                date_str = event.event_date.strftime("%b %d, %Y")
+                description = event.description
+            else:
+                date_str = "TBD"
+                description = event.description if event else "No upcoming events"
+
+            html += f'''
+                <tr style="background-color: {bg_color};">
+                    <td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: 600;">{company_name}</td>
+                    <td style="padding: 10px; border: 1px solid #e2e8f0;">{date_str}</td>
+                    <td style="padding: 10px; border: 1px solid #e2e8f0;">{description}</td>
+                </tr>
+            '''
+
+        html += '''
+            </tbody>
+        </table>
+        '''
+
+        return html
+
     def _markdown_to_html(self, markdown_text: str) -> str:
         """Convert basic markdown to HTML."""
         import re
@@ -196,6 +240,7 @@ class EmailSender:
         articles_by_company: dict[str, list[NewsArticle]],
         snapshots_by_company: dict[str, Optional[FinancialSnapshot]],
         filings_by_company: dict[str, list] = None,
+        events_by_company: dict = None,
         target_date: date = None
     ) -> bool:
         """Send the daily digest email.
@@ -206,6 +251,7 @@ class EmailSender:
             articles_by_company: Dict mapping company name to articles.
             snapshots_by_company: Dict mapping company name to financial snapshot.
             filings_by_company: Dict mapping company name to SEC filings.
+            events_by_company: Dict mapping company name to upcoming events.
             target_date: The date for this digest.
 
         Returns:
@@ -213,6 +259,8 @@ class EmailSender:
         """
         if filings_by_company is None:
             filings_by_company = {}
+        if events_by_company is None:
+            events_by_company = {}
 
         template = self._load_template()
 
@@ -227,10 +275,15 @@ class EmailSender:
             filings = filings_by_company.get(company.name, [])
             company_details += self._format_company_html(company, articles, snapshot, filings)
 
+        # Format events matrix
+        events_matrix = ""
+        if events_by_company:
+            events_matrix = self._format_events_matrix(events_by_company)
+
         # Fill template
         html_content = template.replace("{{DATE}}", target_date.strftime("%B %d, %Y"))
         html_content = html_content.replace("{{SUMMARY}}", f"<h2>Executive Summary</h2>{summary_html}")
-        html_content = html_content.replace("{{COMPANY_DETAILS}}", f"<h2>Company Details</h2>{company_details}")
+        html_content = html_content.replace("{{COMPANY_DETAILS}}", f"<h2>Company Details</h2>{company_details}{events_matrix}")
 
         try:
             response = resend.Emails.send({
