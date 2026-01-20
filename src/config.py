@@ -124,6 +124,7 @@ class Config:
         self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
         self.resend_api_key = os.getenv("RESEND_API_KEY", "")
         self.sec_api_key = os.getenv("SEC_API_KEY", "")
+        self.fmp_api_key = os.getenv("FMP_API_KEY", "")
         self.email_to = os.getenv("EMAIL_TO", "")
         self.email_from = os.getenv("EMAIL_FROM", "")
 

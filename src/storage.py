@@ -62,6 +62,32 @@ class SECFilingRecord:
     fetched_at: Optional[datetime] = None
 
 
+@dataclass
+class EarningsTranscript:
+    """Represents an earnings call transcript."""
+    id: Optional[int]
+    company_id: int
+    ticker: str
+    quarter: str  # e.g., "Q4 2025"
+    transcript_date: date
+    transcript_text: Optional[str]
+    content_summary: Optional[str]  # AI analysis
+    fetched_at: Optional[datetime] = None
+
+
+@dataclass
+class HyperscalerAnnouncement:
+    """Represents a hyperscaler data center announcement."""
+    id: Optional[int]
+    hyperscaler: str  # "AWS", "Google Cloud", etc.
+    title: str
+    description: Optional[str]
+    url: str
+    published_at: Optional[datetime]
+    content_summary: Optional[str]  # AI analysis
+    fetched_at: Optional[datetime] = None
+
+
 class Storage:
     """SQLite storage handler."""
 
@@ -137,11 +163,37 @@ class Storage:
                 fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS earnings_transcripts (
+                id INTEGER PRIMARY KEY,
+                company_id INTEGER REFERENCES companies(id),
+                ticker TEXT NOT NULL,
+                quarter TEXT NOT NULL,
+                transcript_date DATE,
+                transcript_text TEXT,
+                content_summary TEXT,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(company_id, quarter)
+            );
+
+            CREATE TABLE IF NOT EXISTS hyperscaler_announcements (
+                id INTEGER PRIMARY KEY,
+                hyperscaler TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                url TEXT UNIQUE,
+                published_at TIMESTAMP,
+                content_summary TEXT,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_news_company ON news_articles(company_id);
             CREATE INDEX IF NOT EXISTS idx_news_published ON news_articles(published_at);
             CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_snapshots(date);
             CREATE INDEX IF NOT EXISTS idx_sec_company ON sec_filings(company_id);
             CREATE INDEX IF NOT EXISTS idx_sec_filed ON sec_filings(filed_at);
+            CREATE INDEX IF NOT EXISTS idx_transcripts_company ON earnings_transcripts(company_id);
+            CREATE INDEX IF NOT EXISTS idx_transcripts_date ON earnings_transcripts(transcript_date);
+            CREATE INDEX IF NOT EXISTS idx_hyperscaler_published ON hyperscaler_announcements(published_at);
         """)
 
         conn.commit()
@@ -495,3 +547,157 @@ class Storage:
 
         conn.close()
         return filings
+
+    def save_earnings_transcript(self, transcript: EarningsTranscript) -> bool:
+        """Save an earnings transcript if it doesn't already exist.
+
+        Returns:
+            True if transcript was saved, False if it was a duplicate.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO earnings_transcripts
+                    (company_id, ticker, quarter, transcript_date,
+                     transcript_text, content_summary)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    transcript.company_id,
+                    transcript.ticker,
+                    transcript.quarter,
+                    transcript.transcript_date.isoformat()
+                        if transcript.transcript_date else None,
+                    transcript.transcript_text,
+                    transcript.content_summary
+                )
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Duplicate company_id + quarter
+            return False
+        finally:
+            conn.close()
+
+    def get_transcripts_by_date(
+        self,
+        target_date: date,
+        company_id: Optional[int] = None
+    ) -> list[EarningsTranscript]:
+        """Get earnings transcripts fetched on a specific date."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        if company_id:
+            cursor.execute(
+                """
+                SELECT * FROM earnings_transcripts
+                WHERE date(fetched_at) = ? AND company_id = ?
+                ORDER BY transcript_date DESC
+                """,
+                (target_date.isoformat(), company_id)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM earnings_transcripts
+                WHERE date(fetched_at) = ?
+                ORDER BY transcript_date DESC
+                """,
+                (target_date.isoformat(),)
+            )
+
+        transcripts = []
+        for row in cursor.fetchall():
+            transcripts.append(EarningsTranscript(
+                id=row["id"],
+                company_id=row["company_id"],
+                ticker=row["ticker"],
+                quarter=row["quarter"],
+                transcript_date=date.fromisoformat(row["transcript_date"])
+                    if row["transcript_date"] else None,
+                transcript_text=row["transcript_text"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return transcripts
+
+    def save_hyperscaler_announcement(
+        self,
+        announcement: HyperscalerAnnouncement
+    ) -> bool:
+        """Save a hyperscaler announcement if it doesn't already exist.
+
+        Returns:
+            True if announcement was saved, False if it was a duplicate.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO hyperscaler_announcements
+                    (hyperscaler, title, description, url,
+                     published_at, content_summary)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    announcement.hyperscaler,
+                    announcement.title,
+                    announcement.description,
+                    announcement.url,
+                    announcement.published_at.isoformat()
+                        if announcement.published_at else None,
+                    announcement.content_summary
+                )
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Duplicate URL
+            return False
+        finally:
+            conn.close()
+
+    def get_hyperscaler_announcements_by_date(
+        self,
+        target_date: date
+    ) -> list[HyperscalerAnnouncement]:
+        """Get hyperscaler announcements fetched on a specific date."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM hyperscaler_announcements
+            WHERE date(fetched_at) = ?
+            ORDER BY published_at DESC
+            """,
+            (target_date.isoformat(),)
+        )
+
+        announcements = []
+        for row in cursor.fetchall():
+            announcements.append(HyperscalerAnnouncement(
+                id=row["id"],
+                hyperscaler=row["hyperscaler"],
+                title=row["title"],
+                description=row["description"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return announcements

@@ -89,7 +89,8 @@ class EmailSender:
         company: Company,
         articles: list[NewsArticle],
         snapshot: Optional[FinancialSnapshot],
-        filings: list = None
+        filings: list = None,
+        transcripts: list = None
     ) -> str:
         """Format a company's data as HTML."""
         html = f'<div class="company-card">'
@@ -116,6 +117,20 @@ class EmailSender:
                 else:
                     cap_str = f"${cap / 1_000_000:.2f}M"
                 html += f'<p><strong>Market Cap:</strong> {cap_str}</p>'
+
+        # Earnings Call Transcripts
+        if transcripts:
+            html += f'<p><strong>Earnings Transcripts:</strong> {len(transcripts)} recent</p>'
+            html += '<ul>'
+            for transcript in transcripts[:2]:  # Top 2 transcripts
+                html += f'<li><strong>{transcript.quarter}</strong>'
+                if transcript.content_summary:
+                    summary_preview = transcript.content_summary[:200]
+                    if len(transcript.content_summary) > 200:
+                        summary_preview += "..."
+                    html += f'<br><em style="font-size: 0.9em; color: #666;">{summary_preview}</em>'
+                html += '</li>'
+            html += '</ul>'
 
         # SEC Filings
         if filings:
@@ -144,6 +159,44 @@ class EmailSender:
             html += '</ul>'
 
         html += '</div>'
+        return html
+
+    def _format_hyperscaler_section(self, announcements: list) -> str:
+        """Format hyperscaler announcements as an HTML section."""
+        if not announcements:
+            return ""
+
+        html = '''
+        <h2>Hyperscaler Activity</h2>
+        <p style="color: #666; margin-bottom: 15px;">Recent data center expansion announcements from major cloud providers</p>
+        '''
+
+        # Group by hyperscaler
+        by_hyperscaler = {}
+        for ann in announcements:
+            if ann.hyperscaler not in by_hyperscaler:
+                by_hyperscaler[ann.hyperscaler] = []
+            by_hyperscaler[ann.hyperscaler].append(ann)
+
+        for hyperscaler, anns in by_hyperscaler.items():
+            html += f'''
+            <div style="background: #f0f9ff; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #0ea5e9;">
+                <h3 style="margin: 0 0 10px 0; color: #0369a1;">{hyperscaler}</h3>
+                <ul style="margin: 0; padding-left: 20px;">
+            '''
+            for ann in anns[:3]:  # Limit to 3 per hyperscaler
+                html += f'<li><a href="{ann.url}">{ann.title}</a>'
+                if ann.content_summary:
+                    summary_preview = ann.content_summary[:200]
+                    if len(ann.content_summary) > 200:
+                        summary_preview += "..."
+                    html += f'<br><em style="font-size: 0.9em; color: #666;">{summary_preview}</em>'
+                html += '</li>'
+            html += '''
+                </ul>
+            </div>
+            '''
+
         return html
 
     def _format_events_matrix(self, events_by_company: dict) -> str:
@@ -240,6 +293,8 @@ class EmailSender:
         articles_by_company: dict[str, list[NewsArticle]],
         snapshots_by_company: dict[str, Optional[FinancialSnapshot]],
         filings_by_company: dict[str, list] = None,
+        transcripts_by_company: dict[str, list] = None,
+        hyperscaler_announcements: list = None,
         events_by_company: dict = None,
         target_date: date = None
     ) -> bool:
@@ -251,6 +306,8 @@ class EmailSender:
             articles_by_company: Dict mapping company name to articles.
             snapshots_by_company: Dict mapping company name to financial snapshot.
             filings_by_company: Dict mapping company name to SEC filings.
+            transcripts_by_company: Dict mapping company name to earnings transcripts.
+            hyperscaler_announcements: List of hyperscaler announcements.
             events_by_company: Dict mapping company name to upcoming events.
             target_date: The date for this digest.
 
@@ -259,6 +316,10 @@ class EmailSender:
         """
         if filings_by_company is None:
             filings_by_company = {}
+        if transcripts_by_company is None:
+            transcripts_by_company = {}
+        if hyperscaler_announcements is None:
+            hyperscaler_announcements = []
         if events_by_company is None:
             events_by_company = {}
 
@@ -267,13 +328,19 @@ class EmailSender:
         # Format summary
         summary_html = self._markdown_to_html(summary_text)
 
+        # Format hyperscaler section
+        hyperscaler_section = self._format_hyperscaler_section(hyperscaler_announcements)
+
         # Format company details
         company_details = ""
         for company in companies:
             articles = articles_by_company.get(company.name, [])
             snapshot = snapshots_by_company.get(company.name)
             filings = filings_by_company.get(company.name, [])
-            company_details += self._format_company_html(company, articles, snapshot, filings)
+            transcripts = transcripts_by_company.get(company.name, [])
+            company_details += self._format_company_html(
+                company, articles, snapshot, filings, transcripts
+            )
 
         # Format events matrix
         events_matrix = ""
@@ -283,7 +350,10 @@ class EmailSender:
         # Fill template
         html_content = template.replace("{{DATE}}", target_date.strftime("%B %d, %Y"))
         html_content = html_content.replace("{{SUMMARY}}", f"<h2>Executive Summary</h2>{summary_html}")
-        html_content = html_content.replace("{{COMPANY_DETAILS}}", f"<h2>Company Details</h2>{company_details}{events_matrix}")
+        html_content = html_content.replace(
+            "{{COMPANY_DETAILS}}",
+            f"{hyperscaler_section}<h2>Company Details</h2>{company_details}{events_matrix}"
+        )
 
         try:
             response = resend.Emails.send({

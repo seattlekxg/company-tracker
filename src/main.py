@@ -17,10 +17,12 @@ def get_houston_date():
 from .email_sender import EmailSender
 from .events_fetcher import EventsFetcher
 from .finance_fetcher import FinanceFetcher
+from .hyperscaler_fetcher import HyperscalerFetcher
 from .news_fetcher import NewsFetcher
 from .sec_fetcher import SECFetcher
 from .storage import DailySummary, Storage
 from .summarizer import Summarizer
+from .transcript_fetcher import TranscriptFetcher
 
 
 def run_tracker(dry_run: bool = False) -> bool:
@@ -45,21 +47,23 @@ def run_tracker(dry_run: bool = False) -> bool:
         return False
 
     # Initialize components
-    print("\n[1/8] Initializing...")
+    print("\n[1/10] Initializing...")
     storage = Storage()
     news_fetcher = NewsFetcher()
     finance_fetcher = FinanceFetcher()
     sec_fetcher = SECFetcher()
     events_fetcher = EventsFetcher()
+    transcript_fetcher = TranscriptFetcher()
+    hyperscaler_fetcher = HyperscalerFetcher()
     summarizer = Summarizer()
 
     # Sync companies to database
-    print("\n[2/8] Syncing companies to database...")
+    print("\n[2/10] Syncing companies to database...")
     company_ids = storage.sync_companies(COMPANIES)
     print(f"  Tracking {len(company_ids)} companies")
 
     # Fetch news
-    print("\n[3/8] Fetching news articles...")
+    print("\n[3/10] Fetching news articles...")
     articles_by_company = news_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids,
@@ -76,7 +80,7 @@ def run_tracker(dry_run: bool = False) -> bool:
     print(f"  Saved {total_new} new articles to database")
 
     # Fetch financial data
-    print("\n[4/8] Fetching financial data...")
+    print("\n[4/10] Fetching financial data...")
     snapshots_by_company = finance_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids
@@ -89,7 +93,7 @@ def run_tracker(dry_run: bool = False) -> bool:
     print("  Saved financial snapshots to database")
 
     # Fetch SEC filings
-    print("\n[5/8] Fetching SEC filings...")
+    print("\n[5/10] Fetching SEC filings...")
     filings_by_company = sec_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids,
@@ -115,17 +119,64 @@ def run_tracker(dry_run: bool = False) -> bool:
 
     print(f"  Processed {total_filings} new SEC filings")
 
+    # Fetch earnings call transcripts
+    print("\n[6/10] Fetching earnings call transcripts...")
+    transcripts_by_company = transcript_fetcher.fetch_all_companies(
+        COMPANIES,
+        company_ids,
+        quarters_back=2,
+        rate_limit_delay=0.5
+    )
+
+    # Analyze transcripts and save to database
+    total_transcripts = 0
+    for company_name, transcripts in transcripts_by_company.items():
+        for transcript in transcripts:
+            if transcript.transcript_text:
+                print(f"  Analyzing {transcript.quarter} transcript for {company_name}...")
+                transcript.content_summary = summarizer.analyze_earnings_transcript(
+                    transcript, transcript.transcript_text
+                )
+            else:
+                transcript.content_summary = "No transcript content available"
+
+            # Save to database
+            if storage.save_earnings_transcript(transcript):
+                total_transcripts += 1
+
+    print(f"  Processed {total_transcripts} new earnings transcripts")
+
+    # Fetch hyperscaler announcements
+    print("\n[7/10] Fetching hyperscaler announcements...")
+    hyperscaler_announcements = hyperscaler_fetcher.fetch_announcements(hours_back=72)
+
+    # Analyze hyperscaler announcements and save to database
+    total_announcements = 0
+    for announcement in hyperscaler_announcements:
+        print(f"  Analyzing {announcement.hyperscaler} announcement...")
+        announcement.content_summary = summarizer.analyze_hyperscaler_announcement(
+            announcement
+        )
+
+        # Save to database
+        if storage.save_hyperscaler_announcement(announcement):
+            total_announcements += 1
+
+    print(f"  Processed {total_announcements} new hyperscaler announcements")
+
     # Fetch upcoming events
-    print("\n[6/8] Fetching upcoming events...")
+    print("\n[8/10] Fetching upcoming events...")
     events_by_company = events_fetcher.fetch_all_companies(COMPANIES)
 
     # Generate AI summary
-    print("\n[7/8] Generating AI summary...")
+    print("\n[9/10] Generating AI summary...")
     summary_text = summarizer.generate_summary(
         COMPANIES,
         articles_by_company,
         snapshots_by_company,
         filings_by_company,
+        transcripts_by_company,
+        hyperscaler_announcements,
         get_houston_date()
     )
     print("  Summary generated")
@@ -148,9 +199,9 @@ def run_tracker(dry_run: bool = False) -> bool:
 
     # Send email
     if dry_run:
-        print("\n[8/8] Dry run mode - skipping email")
+        print("\n[10/10] Dry run mode - skipping email")
     else:
-        print("\n[8/8] Sending email digest...")
+        print("\n[10/10] Sending email digest...")
         email_sender = EmailSender()
         if email_sender.send_daily_digest(
             summary_text,
@@ -158,6 +209,8 @@ def run_tracker(dry_run: bool = False) -> bool:
             articles_by_company,
             snapshots_by_company,
             filings_by_company,
+            transcripts_by_company,
+            hyperscaler_announcements,
             events_by_company,
             get_houston_date()
         ):
