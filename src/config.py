@@ -28,6 +28,7 @@ class Company:
 # Default list of companies to track
 # Focus: Data center infrastructure and power management companies
 COMPANIES = [
+    # Original companies
     Company(
         name="Eaton",
         ticker="ETN",
@@ -47,6 +48,70 @@ COMPANIES = [
         name="Caterpillar",
         ticker="CAT",
         keywords=["Caterpillar data center", "Cat generator", "Caterpillar power systems"]
+    ),
+    # Power and electrical infrastructure
+    Company(
+        name="ABB",
+        ticker="ABB",
+        keywords=["ABB data center", "ABB power distribution", "ABB UPS", "ABB electrification"]
+    ),
+    Company(
+        name="Siemens",
+        ticker="SIEGY",
+        keywords=["Siemens data center", "Siemens power", "Siemens infrastructure", "Siemens electrical"]
+    ),
+    Company(
+        name="Vertiv",
+        ticker="VRT",
+        keywords=["Vertiv data center", "Vertiv cooling", "Vertiv power", "Vertiv Liebert"]
+    ),
+    Company(
+        name="Legrand",
+        ticker="LGRDY",
+        keywords=["Legrand data center", "Starline busway", "Legrand power distribution", "Raritan"]
+    ),
+    # HVAC and cooling
+    Company(
+        name="Carrier",
+        ticker="CARR",
+        keywords=["Carrier data center", "Carrier cooling", "Carrier HVAC data center"]
+    ),
+    Company(
+        name="Trane",
+        ticker="TT",
+        keywords=["Trane data center", "Trane cooling", "Trane Technologies data center", "Trane HVAC"]
+    ),
+    Company(
+        name="Daikin",
+        ticker="DKILY",
+        keywords=["Daikin data center", "Daikin cooling", "Daikin precision cooling"]
+    ),
+    Company(
+        name="Johnson Controls",
+        ticker="JCI",
+        keywords=["Johnson Controls data center", "JCI data center", "Johnson Controls HVAC", "Johnson Controls cooling"]
+    ),
+    # Connectivity
+    Company(
+        name="Corning",
+        ticker="GLW",
+        keywords=["Corning data center", "Corning fiber", "Corning optical", "Corning connectivity"]
+    ),
+    # Private companies (news only - no ticker)
+    Company(
+        name="BasX",
+        ticker=None,
+        keywords=["BasX Solutions", "BasX data center", "BasX cooling"]
+    ),
+    Company(
+        name="FläktGroup",
+        ticker=None,
+        keywords=["FläktGroup data center", "Flaktgroup data center", "FläktGroup cooling"]
+    ),
+    Company(
+        name="STULZ",
+        ticker=None,
+        keywords=["STULZ data center", "STULZ cooling", "STULZ precision cooling"]
     ),
 ]
 
