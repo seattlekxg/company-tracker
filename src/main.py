@@ -2,9 +2,18 @@
 """Main orchestration script for the Company Tracker."""
 
 import sys
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .config import COMPANIES, config
+
+# Houston timezone (Central Time)
+HOUSTON_TZ = ZoneInfo("America/Chicago")
+
+
+def get_houston_date():
+    """Get the current date in Houston timezone."""
+    return datetime.now(HOUSTON_TZ).date()
 from .email_sender import EmailSender
 from .events_fetcher import EventsFetcher
 from .finance_fetcher import FinanceFetcher
@@ -25,7 +34,7 @@ def run_tracker(dry_run: bool = False) -> bool:
     """
     print("=" * 60)
     print("Company News & Financial Tracker")
-    print(f"Date: {date.today().strftime('%B %d, %Y')}")
+    print(f"Date: {get_houston_date().strftime('%B %d, %Y')}")
     print("=" * 60)
 
     # Validate configuration
@@ -117,14 +126,14 @@ def run_tracker(dry_run: bool = False) -> bool:
         articles_by_company,
         snapshots_by_company,
         filings_by_company,
-        date.today()
+        get_houston_date()
     )
     print("  Summary generated")
 
     # Save summary to database
     summary = DailySummary(
         id=None,
-        date=date.today(),
+        date=get_houston_date(),
         summary_text=summary_text,
         email_sent=False
     )
@@ -150,9 +159,9 @@ def run_tracker(dry_run: bool = False) -> bool:
             snapshots_by_company,
             filings_by_company,
             events_by_company,
-            date.today()
+            get_houston_date()
         ):
-            storage.mark_summary_email_sent(date.today())
+            storage.mark_summary_email_sent(get_houston_date())
             print("  Email sent successfully!")
         else:
             print("  Failed to send email")
