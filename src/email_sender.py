@@ -200,7 +200,7 @@ class EmailSender:
         return html
 
     def _format_events_matrix(self, events_by_company: dict) -> str:
-        """Format upcoming events as an HTML table."""
+        """Format upcoming events as an HTML table, sorted by date (earliest first)."""
         html = '''
         <h2>Upcoming Events</h2>
         <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
@@ -214,10 +214,19 @@ class EmailSender:
             <tbody>
         '''
 
+        # Sort events by date (earliest first), with None dates at the end
+        from datetime import date as date_type
+        max_date = date_type(9999, 12, 31)  # Use far future date for sorting None values
+
+        sorted_events = sorted(
+            events_by_company.items(),
+            key=lambda x: x[1].event_date if (x[1] and x[1].event_date) else max_date
+        )
+
         row_colors = ['#ffffff', '#f7fafc']
         row_idx = 0
 
-        for company_name, event in events_by_company.items():
+        for company_name, event in sorted_events:
             bg_color = row_colors[row_idx % 2]
             row_idx += 1
 
