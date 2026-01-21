@@ -1,4 +1,4 @@
-"""Financial Modeling Prep API integration for fetching earnings call transcripts."""
+"""API Ninjas integration for fetching earnings call transcripts."""
 
 import time
 from datetime import date, datetime
@@ -11,30 +11,25 @@ from .storage import EarningsTranscript
 
 
 class TranscriptFetcher:
-    """Fetches earnings call transcripts from Financial Modeling Prep API."""
+    """Fetches earnings call transcripts from API Ninjas."""
 
-    BASE_URL = "https://financialmodelingprep.com/api/v3/earning_call_transcript"
+    BASE_URL = "https://api.api-ninjas.com/v1/earningstranscript"
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or config.fmp_api_key
+        self.api_key = api_key or config.ninjas_api_key
 
     def _get_quarter_string(self, year: int, quarter: int) -> str:
         """Convert year and quarter to string format like 'Q4 2025'."""
         return f"Q{quarter} {year}"
 
     def _parse_transcript_date(self, date_str: str) -> Optional[date]:
-        """Parse date string from FMP API."""
+        """Parse date string from API Ninjas."""
         if not date_str:
             return None
         try:
-            # FMP returns dates in various formats
-            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
-                try:
-                    return datetime.strptime(date_str, fmt).date()
-                except ValueError:
-                    continue
-            return None
-        except Exception:
+            # API Ninjas returns dates in YYYY-MM-DD format
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
             return None
 
     def fetch_company_transcripts(
@@ -54,7 +49,7 @@ class TranscriptFetcher:
             List of EarningsTranscript objects.
         """
         if not self.api_key:
-            print(f"  Skipping {company.name}: FMP_API_KEY not configured")
+            print(f"  Skipping {company.name}: NINJAS_API_KEY not configured")
             return []
 
         if not company.ticker:
@@ -62,49 +57,75 @@ class TranscriptFetcher:
             return []
 
         transcripts = []
-        url = f"{self.BASE_URL}/{company.ticker}"
-
-        params = {
-            "apikey": self.api_key
+        headers = {
+            "X-Api-Key": self.api_key
         }
 
-        try:
-            response = requests.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        # Calculate which quarters to fetch
+        today = date.today()
+        current_year = today.year
+        current_quarter = (today.month - 1) // 3 + 1
 
-            if isinstance(data, dict) and data.get("Error Message"):
-                print(f"  FMP API error for {company.name}: {data.get('Error Message')}")
-                return transcripts
+        quarters_to_fetch = []
+        year, quarter = current_year, current_quarter
+        for _ in range(quarters_back):
+            quarters_to_fetch.append((year, quarter))
+            quarter -= 1
+            if quarter == 0:
+                quarter = 4
+                year -= 1
 
-            if not isinstance(data, list):
-                return transcripts
+        for year, quarter in quarters_to_fetch:
+            params = {
+                "ticker": company.ticker,
+                "year": year,
+                "quarter": quarter
+            }
 
-            # Get the most recent transcripts (up to quarters_back)
-            for transcript_data in data[:quarters_back]:
-                quarter = transcript_data.get("quarter")
-                year = transcript_data.get("year")
-                content = transcript_data.get("content", "")
-                transcript_date_str = transcript_data.get("date", "")
+            try:
+                response = requests.get(
+                    self.BASE_URL,
+                    headers=headers,
+                    params=params,
+                    timeout=30
+                )
 
-                if not quarter or not year:
+                if response.status_code == 404:
+                    # No transcript for this quarter
                     continue
+                elif response.status_code == 400:
+                    # Invalid request (might be unsupported ticker)
+                    continue
+                elif response.status_code == 403:
+                    print(f"  API Ninjas error: Access forbidden (check API key)")
+                    return transcripts
 
-                quarter_str = self._get_quarter_string(year, quarter)
-                transcript_date = self._parse_transcript_date(transcript_date_str)
+                response.raise_for_status()
+                data = response.json()
 
-                transcripts.append(EarningsTranscript(
-                    id=None,
-                    company_id=company_id,
-                    ticker=company.ticker,
-                    quarter=quarter_str,
-                    transcript_date=transcript_date,
-                    transcript_text=content,
-                    content_summary=None  # Will be filled by summarizer
-                ))
+                # API returns a single transcript object
+                if data and data.get("transcript"):
+                    quarter_str = self._get_quarter_string(
+                        data.get("year", year),
+                        data.get("quarter", quarter)
+                    )
+                    transcript_date = self._parse_transcript_date(data.get("date"))
 
-        except requests.exceptions.RequestException as e:
-            print(f"  Error fetching transcripts for {company.name}: {e}")
+                    transcripts.append(EarningsTranscript(
+                        id=None,
+                        company_id=company_id,
+                        ticker=company.ticker,
+                        quarter=quarter_str,
+                        transcript_date=transcript_date,
+                        transcript_text=data.get("transcript"),
+                        content_summary=None  # Will be filled by summarizer
+                    ))
+
+            except requests.exceptions.RequestException as e:
+                print(f"  Error fetching transcript for {company.name} Q{quarter} {year}: {e}")
+
+            # Small delay between quarter requests
+            time.sleep(0.2)
 
         return transcripts
 
@@ -127,7 +148,7 @@ class TranscriptFetcher:
             Dict mapping company name to list of transcripts.
         """
         if not self.api_key:
-            print("FMP_API_KEY not configured - skipping transcript fetching")
+            print("NINJAS_API_KEY not configured - skipping transcript fetching")
             return {}
 
         all_transcripts = {}
