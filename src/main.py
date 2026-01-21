@@ -63,11 +63,13 @@ def run_tracker(dry_run: bool = False) -> bool:
     print(f"  Tracking {len(company_ids)} companies")
 
     # Fetch news
+    # Note: NewsAPI free tier only returns articles >24 hours old
+    # Using 72 hours to ensure we capture recent news
     print("\n[3/10] Fetching news articles...")
     articles_by_company = news_fetcher.fetch_all_companies(
         COMPANIES,
         company_ids,
-        hours_back=24,
+        hours_back=72,
         rate_limit_delay=1.0
     )
 

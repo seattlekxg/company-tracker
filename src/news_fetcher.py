@@ -53,14 +53,21 @@ class NewsFetcher:
             "apiKey": self.api_key
         }
 
+        # Debug: print query for troubleshooting
+        print(f"    Query: {query[:50]}...")
+
         try:
             response = requests.get(self.BASE_URL, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
 
             if data.get("status") != "ok":
-                print(f"NewsAPI error for {company.name}: {data.get('message', 'Unknown error')}")
+                print(f"    NewsAPI error: {data.get('code')} - {data.get('message', 'Unknown error')}")
                 return articles
+
+            total_results = data.get("totalResults", 0)
+            if total_results == 0:
+                print(f"    No results from API")
 
             for article_data in data.get("articles", []):
                 # Skip articles without URL
