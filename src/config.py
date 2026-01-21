@@ -97,6 +97,12 @@ COMPANIES = [
         ticker="GLW",
         keywords=["Corning data center", "Corning fiber", "Corning optical", "Corning connectivity"]
     ),
+    # Distribution and connectivity
+    Company(
+        name="Wesco",
+        ticker="WCC",
+        keywords=["Wesco International", "Wesco data center", "Wesco electrical distribution"]
+    ),
     # Private companies (news only - no ticker)
     Company(
         name="BasX",
@@ -112,6 +118,16 @@ COMPANIES = [
         name="STULZ",
         ticker=None,
         keywords=["STULZ data center", "STULZ cooling", "STULZ precision cooling"]
+    ),
+    Company(
+        name="AFL",
+        ticker=None,
+        keywords=["AFL Global", "AFL fiber", "AFL data center", "AFL connectivity"]
+    ),
+    Company(
+        name="WWT",
+        ticker=None,
+        keywords=["World Wide Technology", "WWT data center", "WWT infrastructure"]
     ),
 ]
 
