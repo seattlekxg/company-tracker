@@ -15,10 +15,39 @@ class NewsFetcher:
 
     BASE_URL = "https://newsapi.org/v2/everything"
 
+    # Business context terms to filter out irrelevant articles
+    BUSINESS_CONTEXT = [
+        "stock", "shares", "earnings", "revenue", "quarterly",
+        "CEO", "company", "Inc", "Corp", "NYSE", "NASDAQ",
+        "investor", "dividend", "acquisition", "merger"
+    ]
+
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or config.newsapi_key
         if not self.api_key:
             raise ValueError("NewsAPI key is required")
+
+    def _build_query(self, company: Company) -> str:
+        """Build a search query that filters for business-relevant articles.
+
+        Args:
+            company: Company to build query for.
+
+        Returns:
+            NewsAPI query string.
+        """
+        # Get company search terms
+        search_terms = company.get_search_terms()[:3]  # Limit to 3 terms
+        company_part = " OR ".join(f'"{term}"' for term in search_terms)
+
+        # Add business context to filter out irrelevant results
+        # Use a subset of context terms to keep query manageable
+        context_part = " OR ".join(self.BUSINESS_CONTEXT[:6])
+
+        # Combine: (company terms) AND (business context)
+        query = f"({company_part}) AND ({context_part})"
+
+        return query
 
     def fetch_company_news(
         self,
@@ -39,10 +68,8 @@ class NewsFetcher:
         articles = []
         from_date = datetime.utcnow() - timedelta(hours=hours_back)
 
-        # Build search query from company name and keywords
-        search_terms = company.get_search_terms()
-        # Use OR to combine search terms
-        query = " OR ".join(f'"{term}"' for term in search_terms[:3])  # Limit to 3 terms
+        # Build search query with business context filtering
+        query = self._build_query(company)
 
         params = {
             "q": query,
