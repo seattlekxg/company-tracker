@@ -1,5 +1,6 @@
 """Yahoo Finance integration for fetching stock data."""
 
+import time
 from datetime import date
 from typing import Optional
 
@@ -82,13 +83,15 @@ class FinanceFetcher:
     def fetch_all_companies(
         self,
         companies: list[Company],
-        company_ids: dict[str, int]
+        company_ids: dict[str, int],
+        rate_limit_delay: float = 2.0
     ) -> dict[str, Optional[FinancialSnapshot]]:
         """Fetch financial data for all companies.
 
         Args:
             companies: List of companies to fetch data for.
             company_ids: Dict mapping company name to database ID.
+            rate_limit_delay: Delay between API calls in seconds.
 
         Returns:
             Dict mapping company name to FinancialSnapshot (or None).
@@ -111,5 +114,9 @@ class FinanceFetcher:
                       else "  Data retrieved")
             else:
                 print("  No data available")
+
+            # Rate limit to avoid hitting Yahoo Finance limits
+            if rate_limit_delay > 0:
+                time.sleep(rate_limit_delay)
 
         return snapshots

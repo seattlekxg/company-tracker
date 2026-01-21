@@ -1,5 +1,6 @@
 """Fetches upcoming company events (earnings dates from Yahoo Finance)."""
 
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
@@ -125,12 +126,14 @@ class EventsFetcher:
 
     def fetch_all_companies(
         self,
-        companies: list[Company]
+        companies: list[Company],
+        rate_limit_delay: float = 2.0
     ) -> dict[str, UpcomingEvent]:
         """Fetch upcoming events for all companies.
 
         Args:
             companies: List of companies.
+            rate_limit_delay: Delay between API calls in seconds.
 
         Returns:
             Dict mapping company name to their next upcoming event.
@@ -146,5 +149,9 @@ class EventsFetcher:
                 print(f"  Next: {event.description} on {event.event_date}")
             else:
                 print(f"  No upcoming events found")
+
+            # Rate limit to avoid hitting Yahoo Finance limits
+            if rate_limit_delay > 0:
+                time.sleep(rate_limit_delay)
 
         return events
