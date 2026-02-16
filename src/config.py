@@ -141,6 +141,7 @@ class Config:
         self.resend_api_key = os.getenv("RESEND_API_KEY", "")
         self.sec_api_key = os.getenv("SEC_API_KEY", "")
         self.ninjas_api_key = os.getenv("NINJAS_API_KEY", "")
+        self.gnews_api_key = os.getenv("GNEWS_API_KEY", "")
         self.email_to = os.getenv("EMAIL_TO", "")
         self.email_from = os.getenv("EMAIL_FROM", "")
 
@@ -163,8 +164,7 @@ class Config:
             missing.append("ANTHROPIC_API_KEY")
         if not self.resend_api_key:
             missing.append("RESEND_API_KEY")
-        if not self.sec_api_key:
-            missing.append("SEC_API_KEY")
+        # SEC_API_KEY no longer required - using free SEC EDGAR API
         if not self.email_to:
             missing.append("EMAIL_TO")
         if not self.email_from:

@@ -18,6 +18,90 @@ class Summarizer:
             raise ValueError("Anthropic API key is required")
         self.client = anthropic.Anthropic(api_key=self.api_key)
 
+    def filter_relevant_articles(
+        self,
+        company_name: str,
+        articles: list[NewsArticle]
+    ) -> list[NewsArticle]:
+        """Filter articles to only those relevant to data center infrastructure.
+
+        Args:
+            company_name: Name of the company.
+            articles: List of articles to filter.
+
+        Returns:
+            List of relevant articles.
+        """
+        if not articles:
+            return []
+
+        # Build a batch prompt for efficiency
+        articles_text = ""
+        for i, article in enumerate(articles):
+            title = article.title or "No title"
+            desc = (article.description or "")[:200]
+            articles_text += f"\n{i+1}. Title: {title}\n   Description: {desc}\n"
+
+        prompt = f"""You are filtering news articles for {company_name}, a company in the data center infrastructure space.
+
+Review these articles and identify which ones are RELEVANT to:
+- {company_name}'s business in data centers, power systems, cooling, or infrastructure
+- Data center industry news involving {company_name}
+- {company_name}'s products/services for data centers (UPS, generators, cooling, power distribution)
+- Financial news specifically about {company_name} (earnings, contracts, partnerships)
+
+EXCLUDE articles that:
+- Mention "{company_name}" but are about unrelated topics (politics, sports, other industries)
+- Are about different companies or people with similar names
+- Have no clear connection to data center infrastructure business
+
+Articles to review:
+{articles_text}
+
+Return ONLY the numbers of relevant articles as a comma-separated list.
+If no articles are relevant, return "NONE".
+Example response: 1, 3, 5
+"""
+
+        try:
+            message = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=100,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+
+            response_text = ""
+            for block in message.content:
+                if block.type == "text":
+                    response_text += block.text
+
+            response_text = response_text.strip().upper()
+
+            if response_text == "NONE" or not response_text:
+                return []
+
+            # Parse the numbers
+            try:
+                relevant_indices = [
+                    int(n.strip()) - 1
+                    for n in response_text.replace(" ", "").split(",")
+                    if n.strip().isdigit()
+                ]
+                return [
+                    articles[i] for i in relevant_indices
+                    if 0 <= i < len(articles)
+                ]
+            except (ValueError, IndexError):
+                # If parsing fails, return all articles as fallback
+                return articles
+
+        except Exception as e:
+            print(f"    Error filtering articles: {e}")
+            # On error, return all articles as fallback
+            return articles
+
     def _format_company_data(
         self,
         company: Company,
@@ -266,6 +350,55 @@ Summary:"""
             print(f"Error analyzing hyperscaler announcement: {e}")
             return "Error analyzing announcement"
 
+    def analyze_pe_announcement(self, announcement) -> str:
+        """Analyze a Private Equity data center investment announcement.
+
+        Args:
+            announcement: The PEDatacenterAnnouncement object.
+
+        Returns:
+            AI-generated summary focused on investment signals.
+        """
+        content = f"Title: {announcement.title}\n"
+        if announcement.description:
+            content += f"Description: {announcement.description}"
+
+        prompt = f"""Analyze this {announcement.pe_firm} data center investment announcement.
+
+Extract key details relevant to data center infrastructure market:
+1. **Deal Type**: Is this an acquisition, expansion, new investment, or partnership?
+2. **Target/Portfolio**: What data center assets or companies are involved?
+3. **Scale**: What is the deal value, capacity (MW), or size?
+4. **Location**: Where are the assets located?
+5. **Market Signal**: What does this indicate about PE firm appetite for data center investments?
+
+Be concise - provide a 2-3 sentence summary with the most relevant facts for understanding PE activity in data centers.
+
+Article:
+{content}
+
+Summary:"""
+
+        try:
+            message = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=300,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+
+            summary = ""
+            for block in message.content:
+                if block.type == "text":
+                    summary += block.text
+
+            return summary.strip()
+
+        except Exception as e:
+            print(f"Error analyzing PE announcement: {e}")
+            return "Error analyzing announcement"
+
     def generate_summary(
         self,
         companies: list[Company],
@@ -274,7 +407,10 @@ Summary:"""
         filings_by_company: dict[str, list] = None,
         transcripts_by_company: dict[str, list] = None,
         hyperscaler_announcements: list = None,
-        target_date: date = None
+        target_date: date = None,
+        is_weekly: bool = False,
+        week_start_date: date = None,
+        pe_announcements: list = None
     ) -> str:
         """Generate an AI summary of all company data.
 
@@ -286,6 +422,9 @@ Summary:"""
             transcripts_by_company: Dict mapping company name to earnings transcripts.
             hyperscaler_announcements: List of hyperscaler announcements.
             target_date: The date for this summary.
+            is_weekly: If True, generate a weekly summary instead of daily.
+            week_start_date: Start date of the week (for weekly summaries).
+            pe_announcements: List of PE data center announcements.
 
         Returns:
             Generated summary text.
@@ -301,6 +440,9 @@ Summary:"""
 
         if hyperscaler_announcements is None:
             hyperscaler_announcements = []
+
+        if pe_announcements is None:
+            pe_announcements = []
 
         # Build the data section
         data_sections = []
@@ -325,7 +467,61 @@ Summary:"""
                 if ann.content_summary:
                     hyperscaler_section += f"  Analysis: {ann.content_summary}\n"
 
-        prompt = f"""You are a financial analyst assistant specializing in data center infrastructure companies. Below is today's ({target_date.strftime('%B %d, %Y')}) news, financial data, SEC filings, and earnings call insights for companies in the data center power and infrastructure space.
+        # Build PE data center section
+        pe_section = ""
+        if pe_announcements:
+            pe_section = "\n\n# Private Equity Data Center Activity\n"
+            for ann in pe_announcements[:10]:  # Limit to 10
+                pe_section += f"\n## {ann.pe_firm}\n"
+                pe_section += f"- **{ann.title}**\n"
+                if ann.content_summary:
+                    pe_section += f"  Analysis: {ann.content_summary}\n"
+
+        # Generate different prompts for daily vs weekly summaries
+        if is_weekly:
+            date_range_str = f"{week_start_date.strftime('%B %d')} - {target_date.strftime('%B %d, %Y')}"
+            prompt = f"""You are a financial analyst assistant specializing in data center infrastructure companies. Below is this week's ({date_range_str}) aggregated news, financial data, SEC filings, and earnings call insights for companies in the data center power and infrastructure space.
+
+Please create a professional WEEKLY SUMMARY with the following structure:
+
+1. **Week in Review** (3-4 sentences): Provide a high-level overview of the most significant developments across all tracked companies this week. Highlight major themes, trends, and any market-moving events.
+
+2. **Hyperscaler Demand Signals**: Summarize all hyperscaler (AWS, Google, Microsoft, Meta, Oracle) data center expansion announcements from this week. Note locations, scale, investment amounts, and potential supplier impact.
+
+3. **Private Equity Activity**: Summarize any Private Equity firm data center investments, acquisitions, or expansions. Note deal values, target assets, and what this signals about PE appetite for data center infrastructure.
+
+4. **Supplier Capacity Signals**: Compile earnings call insights about backlog, lead times, capacity utilization, or demand trends from tracked suppliers. Identify any patterns across multiple companies.
+
+5. **SEC Filing Summary**: Summarize important SEC filings from the week, especially those with data center-related content. Highlight any 10-Q/10-K quarterly results, material changes, or significant disclosures.
+
+6. **Weekly Market Performance**: Summarize stock performance across tracked companies. Identify biggest gainers/losers and any correlation with news events.
+
+7. **Company-by-Company Highlights**: For each company with noteworthy updates this week, provide a consolidated summary including:
+   - Key news developments (especially data center related)
+   - Earnings call insights (if available)
+   - SEC filing insights
+   - Weekly stock performance
+   - Notable patterns or concerns
+
+8. **Data Center Market Trends**: Identify broader themes, patterns, or emerging trends in the data center infrastructure market based on this week's information.
+
+9. **Looking Ahead**: Note any upcoming earnings calls, expected SEC filings, or events to watch next week.
+
+Focus on synthesizing the week's information into actionable insights. Identify patterns and connections across different data sources. Be comprehensive but organized.
+
+---
+
+# This Week's Data ({date_range_str})
+
+{combined_data}
+{hyperscaler_section}
+{pe_section}
+
+---
+
+Please generate the weekly summary:"""
+        else:
+            prompt = f"""You are a financial analyst assistant specializing in data center infrastructure companies. Below is today's ({target_date.strftime('%B %d, %Y')}) news, financial data, SEC filings, and earnings call insights for companies in the data center power and infrastructure space.
 
 Please create a professional daily briefing summary with the following structure:
 
@@ -333,22 +529,24 @@ Please create a professional daily briefing summary with the following structure
 
 2. **Hyperscaler Demand Signals**: Summarize any hyperscaler (AWS, Google, Microsoft, Meta, Oracle) data center expansion announcements. Note locations, scale, and potential supplier impact.
 
-3. **Supplier Capacity Signals**: Highlight any earnings call insights about backlog, lead times, capacity utilization, or demand trends from tracked suppliers.
+3. **Private Equity Activity**: Summarize any Private Equity firm data center investments, acquisitions, or expansions. Note deal values, target assets, and market implications.
 
-4. **SEC Filing Highlights**: Summarize any important SEC filings, especially those with data center-related content. Note any material changes, risk factors, or business developments disclosed.
+4. **Supplier Capacity Signals**: Highlight any earnings call insights about backlog, lead times, capacity utilization, or demand trends from tracked suppliers.
 
-5. **Market Movers**: List any companies with notable price movements (>3% change) or significant news.
+5. **SEC Filing Highlights**: Summarize any important SEC filings, especially those with data center-related content. Note any material changes, risk factors, or business developments disclosed.
 
-6. **Company Highlights**: For each company with noteworthy updates, provide a brief 1-2 sentence summary of:
+6. **Market Movers**: List any companies with notable price movements (>3% change) or significant news.
+
+7. **Company Highlights**: For each company with noteworthy updates, provide a brief 1-2 sentence summary of:
    - Key news developments (especially data center related)
    - Earnings call insights (if available)
    - SEC filing insights
    - Stock performance context
    - Any notable patterns or concerns
 
-7. **Data Center Market Insights**: Any trends or patterns relevant to the data center infrastructure market based on today's information.
+8. **Data Center Market Insights**: Any trends or patterns relevant to the data center infrastructure market based on today's information.
 
-8. **Watch List**: Any items that warrant continued monitoring.
+9. **Watch List**: Any items that warrant continued monitoring.
 
 Focus on actionable insights and material information, particularly as it relates to data center products and markets. Be concise but comprehensive. If there's no significant news for a company, you can skip or briefly note "No significant updates."
 
@@ -358,6 +556,7 @@ Focus on actionable insights and material information, particularly as it relate
 
 {combined_data}
 {hyperscaler_section}
+{pe_section}
 
 ---
 

@@ -15,11 +15,24 @@ class NewsFetcher:
 
     BASE_URL = "https://newsapi.org/v2/everything"
 
-    # Business context terms to filter out irrelevant articles
+    # Data center and infrastructure context terms to ensure relevance
+    DATA_CENTER_CONTEXT = [
+        "data center", "datacenter", "data centre",
+        "hyperscaler", "cloud infrastructure",
+        "power distribution", "UPS", "uninterruptible power",
+        "cooling system", "HVAC", "precision cooling",
+        "electrical infrastructure", "power management",
+        "generator", "backup power",
+        "AI infrastructure", "GPU cluster",
+        "colocation", "colo facility",
+        "megawatt", "MW capacity"
+    ]
+
+    # Business/financial context as secondary filter
     BUSINESS_CONTEXT = [
-        "stock", "shares", "earnings", "revenue", "quarterly",
-        "CEO", "company", "Inc", "Corp", "NYSE", "NASDAQ",
-        "investor", "dividend", "acquisition", "merger"
+        "contract", "deal", "partnership", "expansion",
+        "quarterly", "earnings", "revenue",
+        "acquisition", "order", "backlog"
     ]
 
     def __init__(self, api_key: Optional[str] = None):
@@ -28,7 +41,7 @@ class NewsFetcher:
             raise ValueError("NewsAPI key is required")
 
     def _build_query(self, company: Company) -> str:
-        """Build a search query that filters for business-relevant articles.
+        """Build a search query that filters for data center-relevant articles.
 
         Args:
             company: Company to build query for.
@@ -36,15 +49,30 @@ class NewsFetcher:
         Returns:
             NewsAPI query string.
         """
-        # Get company search terms
-        search_terms = company.get_search_terms()[:3]  # Limit to 3 terms
-        company_part = " OR ".join(f'"{term}"' for term in search_terms)
+        # Use company name + ticker for better precision
+        search_terms = [company.name]
+        if company.ticker:
+            search_terms.append(company.ticker)
 
-        # Add business context to filter out irrelevant results
-        # Use a subset of context terms to keep query manageable
-        context_part = " OR ".join(self.BUSINESS_CONTEXT[:6])
+        # Add the most specific keyword if available (usually contains "data center")
+        if company.keywords:
+            for kw in company.keywords:
+                if "data center" in kw.lower():
+                    search_terms.append(kw)
+                    break
 
-        # Combine: (company terms) AND (business context)
+        company_part = " OR ".join(f'"{term}"' for term in search_terms[:3])
+
+        # Require data center / infrastructure context
+        # Use a subset to keep query length manageable for NewsAPI
+        dc_context = [
+            "data center", "datacenter", "power distribution",
+            "UPS", "cooling", "generator", "infrastructure",
+            "hyperscaler", "cloud", "AI infrastructure"
+        ]
+        context_part = " OR ".join(f'"{term}"' for term in dc_context[:6])
+
+        # Combine: (company terms) AND (data center context)
         query = f"({company_part}) AND ({context_part})"
 
         return query

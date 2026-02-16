@@ -88,6 +88,19 @@ class HyperscalerAnnouncement:
     fetched_at: Optional[datetime] = None
 
 
+@dataclass
+class PEDatacenterAnnouncement:
+    """Represents a Private Equity data center investment announcement."""
+    id: Optional[int]
+    pe_firm: str  # "Blackstone", "KKR", etc.
+    title: str
+    description: Optional[str]
+    url: str
+    published_at: Optional[datetime]
+    content_summary: Optional[str]  # AI analysis
+    fetched_at: Optional[datetime] = None
+
+
 class Storage:
     """SQLite storage handler."""
 
@@ -96,6 +109,7 @@ class Storage:
         # Ensure the data directory exists
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
+        self._migrate_db()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection."""
@@ -186,6 +200,17 @@ class Storage:
                 fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS pe_datacenter_announcements (
+                id INTEGER PRIMARY KEY,
+                pe_firm TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                url TEXT UNIQUE,
+                published_at TIMESTAMP,
+                content_summary TEXT,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_news_company ON news_articles(company_id);
             CREATE INDEX IF NOT EXISTS idx_news_published ON news_articles(published_at);
             CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_snapshots(date);
@@ -194,9 +219,52 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_transcripts_company ON earnings_transcripts(company_id);
             CREATE INDEX IF NOT EXISTS idx_transcripts_date ON earnings_transcripts(transcript_date);
             CREATE INDEX IF NOT EXISTS idx_hyperscaler_published ON hyperscaler_announcements(published_at);
+            CREATE INDEX IF NOT EXISTS idx_pe_datacenter_published ON pe_datacenter_announcements(published_at);
         """)
 
         conn.commit()
+        conn.close()
+
+    def _migrate_db(self):
+        """Run database migrations for existing databases."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # Check if emailed_at column exists in news_articles
+        cursor.execute("PRAGMA table_info(news_articles)")
+        columns = [row["name"] for row in cursor.fetchall()]
+
+        if "emailed_at" not in columns:
+            print("  Migrating database: adding emailed_at columns...")
+            # Add emailed_at column to all content tables
+            # Mark all existing items as emailed to avoid re-sending old content
+            cursor.executescript("""
+                ALTER TABLE news_articles ADD COLUMN emailed_at TIMESTAMP DEFAULT NULL;
+                ALTER TABLE sec_filings ADD COLUMN emailed_at TIMESTAMP DEFAULT NULL;
+                ALTER TABLE earnings_transcripts ADD COLUMN emailed_at TIMESTAMP DEFAULT NULL;
+                ALTER TABLE hyperscaler_announcements ADD COLUMN emailed_at TIMESTAMP DEFAULT NULL;
+
+                UPDATE news_articles SET emailed_at = fetched_at WHERE emailed_at IS NULL;
+                UPDATE sec_filings SET emailed_at = fetched_at WHERE emailed_at IS NULL;
+                UPDATE earnings_transcripts SET emailed_at = fetched_at WHERE emailed_at IS NULL;
+                UPDATE hyperscaler_announcements SET emailed_at = fetched_at WHERE emailed_at IS NULL;
+            """)
+            conn.commit()
+            print("  Migration complete: existing items marked as emailed")
+
+        # Check if emailed_at column exists in pe_datacenter_announcements (new table)
+        cursor.execute("PRAGMA table_info(pe_datacenter_announcements)")
+        pe_columns = [row["name"] for row in cursor.fetchall()]
+
+        if pe_columns and "emailed_at" not in pe_columns:
+            print("  Migrating database: adding emailed_at to pe_datacenter_announcements...")
+            cursor.executescript("""
+                ALTER TABLE pe_datacenter_announcements ADD COLUMN emailed_at TIMESTAMP DEFAULT NULL;
+                UPDATE pe_datacenter_announcements SET emailed_at = fetched_at WHERE emailed_at IS NULL;
+            """)
+            conn.commit()
+            print("  PE datacenter migration complete")
+
         conn.close()
 
     def sync_companies(self, companies: list[Company]) -> dict[str, int]:
@@ -689,6 +757,526 @@ class Storage:
             announcements.append(HyperscalerAnnouncement(
                 id=row["id"],
                 hyperscaler=row["hyperscaler"],
+                title=row["title"],
+                description=row["description"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return announcements
+
+    def save_pe_announcement(
+        self,
+        announcement: PEDatacenterAnnouncement
+    ) -> bool:
+        """Save a PE data center announcement if it doesn't already exist.
+
+        Returns:
+            True if announcement was saved, False if it was a duplicate.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO pe_datacenter_announcements
+                    (pe_firm, title, description, url,
+                     published_at, content_summary)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    announcement.pe_firm,
+                    announcement.title,
+                    announcement.description,
+                    announcement.url,
+                    announcement.published_at.isoformat()
+                        if announcement.published_at else None,
+                    announcement.content_summary
+                )
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Duplicate URL
+            return False
+        finally:
+            conn.close()
+
+    def get_pe_announcements_by_date(
+        self,
+        target_date: date
+    ) -> list[PEDatacenterAnnouncement]:
+        """Get PE data center announcements fetched on a specific date."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM pe_datacenter_announcements
+            WHERE date(fetched_at) = ?
+            ORDER BY published_at DESC
+            """,
+            (target_date.isoformat(),)
+        )
+
+        announcements = []
+        for row in cursor.fetchall():
+            announcements.append(PEDatacenterAnnouncement(
+                id=row["id"],
+                pe_firm=row["pe_firm"],
+                title=row["title"],
+                description=row["description"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return announcements
+
+    # ========== Unsent Item Query Methods ==========
+
+    def get_unsent_articles(self, company_id: int) -> list[NewsArticle]:
+        """Get news articles that haven't been emailed yet for a company."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM news_articles
+            WHERE company_id = ? AND emailed_at IS NULL
+            ORDER BY published_at DESC
+            """,
+            (company_id,)
+        )
+
+        articles = []
+        for row in cursor.fetchall():
+            articles.append(NewsArticle(
+                id=row["id"],
+                company_id=row["company_id"],
+                title=row["title"],
+                description=row["description"],
+                source=row["source"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return articles
+
+    def get_unsent_sec_filings(self, company_id: int) -> list[SECFilingRecord]:
+        """Get SEC filings that haven't been emailed yet for a company."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM sec_filings
+            WHERE company_id = ? AND emailed_at IS NULL
+            ORDER BY filed_at DESC
+            """,
+            (company_id,)
+        )
+
+        filings = []
+        for row in cursor.fetchall():
+            filings.append(SECFilingRecord(
+                id=row["id"],
+                company_id=row["company_id"],
+                form_type=row["form_type"],
+                filed_at=datetime.fromisoformat(row["filed_at"])
+                    if row["filed_at"] else None,
+                accession_number=row["accession_number"],
+                filing_url=row["filing_url"],
+                description=row["description"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return filings
+
+    def get_unsent_transcripts(self, company_id: int) -> list[EarningsTranscript]:
+        """Get earnings transcripts that haven't been emailed yet for a company."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM earnings_transcripts
+            WHERE company_id = ? AND emailed_at IS NULL
+            ORDER BY transcript_date DESC
+            """,
+            (company_id,)
+        )
+
+        transcripts = []
+        for row in cursor.fetchall():
+            transcripts.append(EarningsTranscript(
+                id=row["id"],
+                company_id=row["company_id"],
+                ticker=row["ticker"],
+                quarter=row["quarter"],
+                transcript_date=date.fromisoformat(row["transcript_date"])
+                    if row["transcript_date"] else None,
+                transcript_text=row["transcript_text"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return transcripts
+
+    def get_unsent_hyperscaler_announcements(self) -> list[HyperscalerAnnouncement]:
+        """Get hyperscaler announcements that haven't been emailed yet."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM hyperscaler_announcements
+            WHERE emailed_at IS NULL
+            ORDER BY published_at DESC
+            """
+        )
+
+        announcements = []
+        for row in cursor.fetchall():
+            announcements.append(HyperscalerAnnouncement(
+                id=row["id"],
+                hyperscaler=row["hyperscaler"],
+                title=row["title"],
+                description=row["description"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return announcements
+
+    def get_unsent_pe_announcements(self) -> list[PEDatacenterAnnouncement]:
+        """Get PE data center announcements that haven't been emailed yet."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM pe_datacenter_announcements
+            WHERE emailed_at IS NULL
+            ORDER BY published_at DESC
+            """
+        )
+
+        announcements = []
+        for row in cursor.fetchall():
+            announcements.append(PEDatacenterAnnouncement(
+                id=row["id"],
+                pe_firm=row["pe_firm"],
+                title=row["title"],
+                description=row["description"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return announcements
+
+    # ========== Mark As Emailed Methods ==========
+
+    def mark_articles_emailed(self, article_ids: list[int]):
+        """Mark news articles as emailed."""
+        if not article_ids:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(article_ids))
+        cursor.execute(
+            f"""
+            UPDATE news_articles
+            SET emailed_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            article_ids
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_sec_filings_emailed(self, filing_ids: list[int]):
+        """Mark SEC filings as emailed."""
+        if not filing_ids:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(filing_ids))
+        cursor.execute(
+            f"""
+            UPDATE sec_filings
+            SET emailed_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            filing_ids
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_transcripts_emailed(self, transcript_ids: list[int]):
+        """Mark earnings transcripts as emailed."""
+        if not transcript_ids:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(transcript_ids))
+        cursor.execute(
+            f"""
+            UPDATE earnings_transcripts
+            SET emailed_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            transcript_ids
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_hyperscaler_announcements_emailed(self, announcement_ids: list[int]):
+        """Mark hyperscaler announcements as emailed."""
+        if not announcement_ids:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(announcement_ids))
+        cursor.execute(
+            f"""
+            UPDATE hyperscaler_announcements
+            SET emailed_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            announcement_ids
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_pe_announcements_emailed(self, announcement_ids: list[int]):
+        """Mark PE data center announcements as emailed."""
+        if not announcement_ids:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(announcement_ids))
+        cursor.execute(
+            f"""
+            UPDATE pe_datacenter_announcements
+            SET emailed_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            announcement_ids
+        )
+        conn.commit()
+        conn.close()
+
+    # ========== Date Range Query Methods (for Weekly Summary) ==========
+
+    def get_articles_in_range(
+        self,
+        company_id: int,
+        start_date: date,
+        end_date: date
+    ) -> list[NewsArticle]:
+        """Get news articles within a date range for a company."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM news_articles
+            WHERE company_id = ?
+              AND date(fetched_at) >= ?
+              AND date(fetched_at) <= ?
+            ORDER BY published_at DESC
+            """,
+            (company_id, start_date.isoformat(), end_date.isoformat())
+        )
+
+        articles = []
+        for row in cursor.fetchall():
+            articles.append(NewsArticle(
+                id=row["id"],
+                company_id=row["company_id"],
+                title=row["title"],
+                description=row["description"],
+                source=row["source"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return articles
+
+    def get_sec_filings_in_range(
+        self,
+        company_id: int,
+        start_date: date,
+        end_date: date
+    ) -> list[SECFilingRecord]:
+        """Get SEC filings within a date range for a company."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM sec_filings
+            WHERE company_id = ?
+              AND date(fetched_at) >= ?
+              AND date(fetched_at) <= ?
+            ORDER BY filed_at DESC
+            """,
+            (company_id, start_date.isoformat(), end_date.isoformat())
+        )
+
+        filings = []
+        for row in cursor.fetchall():
+            filings.append(SECFilingRecord(
+                id=row["id"],
+                company_id=row["company_id"],
+                form_type=row["form_type"],
+                filed_at=datetime.fromisoformat(row["filed_at"])
+                    if row["filed_at"] else None,
+                accession_number=row["accession_number"],
+                filing_url=row["filing_url"],
+                description=row["description"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return filings
+
+    def get_transcripts_in_range(
+        self,
+        company_id: int,
+        start_date: date,
+        end_date: date
+    ) -> list[EarningsTranscript]:
+        """Get earnings transcripts within a date range for a company."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM earnings_transcripts
+            WHERE company_id = ?
+              AND date(fetched_at) >= ?
+              AND date(fetched_at) <= ?
+            ORDER BY transcript_date DESC
+            """,
+            (company_id, start_date.isoformat(), end_date.isoformat())
+        )
+
+        transcripts = []
+        for row in cursor.fetchall():
+            transcripts.append(EarningsTranscript(
+                id=row["id"],
+                company_id=row["company_id"],
+                ticker=row["ticker"],
+                quarter=row["quarter"],
+                transcript_date=date.fromisoformat(row["transcript_date"])
+                    if row["transcript_date"] else None,
+                transcript_text=row["transcript_text"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return transcripts
+
+    def get_hyperscaler_announcements_in_range(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> list[HyperscalerAnnouncement]:
+        """Get hyperscaler announcements within a date range."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM hyperscaler_announcements
+            WHERE date(fetched_at) >= ?
+              AND date(fetched_at) <= ?
+            ORDER BY published_at DESC
+            """,
+            (start_date.isoformat(), end_date.isoformat())
+        )
+
+        announcements = []
+        for row in cursor.fetchall():
+            announcements.append(HyperscalerAnnouncement(
+                id=row["id"],
+                hyperscaler=row["hyperscaler"],
+                title=row["title"],
+                description=row["description"],
+                url=row["url"],
+                published_at=datetime.fromisoformat(row["published_at"])
+                    if row["published_at"] else None,
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return announcements
+
+    def get_pe_announcements_in_range(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> list[PEDatacenterAnnouncement]:
+        """Get PE data center announcements within a date range."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM pe_datacenter_announcements
+            WHERE date(fetched_at) >= ?
+              AND date(fetched_at) <= ?
+            ORDER BY published_at DESC
+            """,
+            (start_date.isoformat(), end_date.isoformat())
+        )
+
+        announcements = []
+        for row in cursor.fetchall():
+            announcements.append(PEDatacenterAnnouncement(
+                id=row["id"],
+                pe_firm=row["pe_firm"],
                 title=row["title"],
                 description=row["description"],
                 url=row["url"],

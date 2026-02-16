@@ -199,6 +199,44 @@ class EmailSender:
 
         return html
 
+    def _format_pe_section(self, announcements: list) -> str:
+        """Format PE data center announcements as an HTML section."""
+        if not announcements:
+            return ""
+
+        html = '''
+        <h2>Private Equity Data Center Activity</h2>
+        <p style="color: #666; margin-bottom: 15px;">Recent PE firm data center investments, acquisitions, and expansions</p>
+        '''
+
+        # Group by PE firm
+        by_pe_firm = {}
+        for ann in announcements:
+            if ann.pe_firm not in by_pe_firm:
+                by_pe_firm[ann.pe_firm] = []
+            by_pe_firm[ann.pe_firm].append(ann)
+
+        for pe_firm, anns in by_pe_firm.items():
+            html += f'''
+            <div style="background: #fdf4ff; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #a855f7;">
+                <h3 style="margin: 0 0 10px 0; color: #7c3aed;">{pe_firm}</h3>
+                <ul style="margin: 0; padding-left: 20px;">
+            '''
+            for ann in anns[:3]:  # Limit to 3 per PE firm
+                html += f'<li><a href="{ann.url}">{ann.title}</a>'
+                if ann.content_summary:
+                    summary_preview = ann.content_summary[:200]
+                    if len(ann.content_summary) > 200:
+                        summary_preview += "..."
+                    html += f'<br><em style="font-size: 0.9em; color: #666;">{summary_preview}</em>'
+                html += '</li>'
+            html += '''
+                </ul>
+            </div>
+            '''
+
+        return html
+
     def _format_events_matrix(self, events_by_company: dict) -> str:
         """Format upcoming events as an HTML table, sorted by date (earliest first)."""
         html = '''
@@ -305,9 +343,12 @@ class EmailSender:
         transcripts_by_company: dict[str, list] = None,
         hyperscaler_announcements: list = None,
         events_by_company: dict = None,
-        target_date: date = None
+        target_date: date = None,
+        is_weekly: bool = False,
+        week_start_date: date = None,
+        pe_announcements: list = None
     ) -> bool:
-        """Send the daily digest email.
+        """Send the daily or weekly digest email.
 
         Args:
             summary_text: AI-generated summary.
@@ -319,6 +360,9 @@ class EmailSender:
             hyperscaler_announcements: List of hyperscaler announcements.
             events_by_company: Dict mapping company name to upcoming events.
             target_date: The date for this digest.
+            is_weekly: If True, format as weekly summary.
+            week_start_date: Start date of the week (for weekly summaries).
+            pe_announcements: List of PE data center announcements.
 
         Returns:
             True if email was sent successfully.
@@ -331,6 +375,8 @@ class EmailSender:
             hyperscaler_announcements = []
         if events_by_company is None:
             events_by_company = {}
+        if pe_announcements is None:
+            pe_announcements = []
 
         template = self._load_template()
 
@@ -339,6 +385,9 @@ class EmailSender:
 
         # Format hyperscaler section
         hyperscaler_section = self._format_hyperscaler_section(hyperscaler_announcements)
+
+        # Format PE section
+        pe_section = self._format_pe_section(pe_announcements)
 
         # Format company details
         company_details = ""
@@ -356,19 +405,28 @@ class EmailSender:
         if events_by_company:
             events_matrix = self._format_events_matrix(events_by_company)
 
-        # Fill template
-        html_content = template.replace("{{DATE}}", target_date.strftime("%B %d, %Y"))
-        html_content = html_content.replace("{{SUMMARY}}", f"<h2>Executive Summary</h2>{summary_html}")
+        # Fill template based on daily vs weekly format
+        if is_weekly:
+            date_range_str = f"{week_start_date.strftime('%B %d')} - {target_date.strftime('%B %d, %Y')}"
+            html_content = template.replace("{{DATE}}", f"Week of {date_range_str}")
+            html_content = html_content.replace("{{SUMMARY}}", f"<h2>Week in Review</h2>{summary_html}")
+            html_content = html_content.replace("Daily Company Briefing", "Weekly Company Summary")
+            subject = f"Weekly Company Summary - {date_range_str}"
+        else:
+            html_content = template.replace("{{DATE}}", target_date.strftime("%B %d, %Y"))
+            html_content = html_content.replace("{{SUMMARY}}", f"<h2>Executive Summary</h2>{summary_html}")
+            subject = f"Daily Company Briefing - {target_date.strftime('%B %d, %Y')}"
+
         html_content = html_content.replace(
             "{{COMPANY_DETAILS}}",
-            f"{hyperscaler_section}<h2>Company Details</h2>{company_details}{events_matrix}"
+            f"{hyperscaler_section}{pe_section}<h2>Company Details</h2>{company_details}{events_matrix}"
         )
 
         try:
             response = resend.Emails.send({
                 "from": self.from_email,
                 "to": [self.to_email],
-                "subject": f"Daily Company Briefing - {target_date.strftime('%B %d, %Y')}",
+                "subject": subject,
                 "html": html_content
             })
             print(f"Email sent successfully. ID: {response['id']}")
