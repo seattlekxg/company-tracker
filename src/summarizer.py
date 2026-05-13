@@ -897,8 +897,6 @@ Please create a professional daily briefing summary with the following structure
 
 8. **Data Center Market Insights**: Any trends or patterns relevant to the data center infrastructure market based on today's information.
 
-9. **Watch List**: Any items that warrant continued monitoring.
-
 Focus on actionable insights and material information, particularly as it relates to data center products and markets. Be concise but comprehensive. If there's no significant news for a company, you can skip or briefly note "No significant updates."
 
 ---
