@@ -692,10 +692,13 @@ def run_tracker(dry_run: bool = False) -> bool:
                     table_name = rest[:last_dash]
                     row_id = int(rest[last_dash + 1:])
                     extracted = summarizer._parse_mw_extraction_response(response_text)
+                    # Use 0 as sentinel when both are unknown, so backfill
+                    # won't retry this item (query filters capacity_mw > 0)
+                    capacity = extracted["capacity_mw"] if extracted["capacity_mw"] is not None else 0
                     storage.save_announcement_mw_data(
                         table_name,
                         row_id,
-                        extracted["capacity_mw"],
+                        capacity,
                         extracted["target_year"]
                     )
 

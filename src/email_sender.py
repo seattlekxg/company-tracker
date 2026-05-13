@@ -304,7 +304,10 @@ class EmailSender:
             return ""
 
         # Collect all years and build lookup
-        years = sorted(set(d["target_year"] for d in mw_data))
+        # None target_year means "Unspecified" — sort those to the end
+        raw_years = set(d["target_year"] for d in mw_data)
+        known_years = sorted(y for y in raw_years if y is not None)
+        years = known_years + ([None] if None in raw_years else [])
         if not years:
             return ""
 
@@ -328,7 +331,8 @@ class EmailSender:
 
         # Build header
         year_headers = "".join(
-            f'<th style="padding: 12px; text-align: right; border: 1px solid #e2e8f0;">{y}</th>'
+            f'<th style="padding: 12px; text-align: right; border: 1px solid #e2e8f0;">'
+            f'{"Unspecified" if y is None else y}</th>'
             for y in years
         )
 

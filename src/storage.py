@@ -1684,8 +1684,10 @@ class Storage:
     def get_mw_capacity_summary(self) -> list[dict]:
         """Get aggregated MW capacity by source type and target year.
 
+        Items with no target year are grouped under target_year=None.
+
         Returns:
-            List of dicts: {"source": str, "target_year": int, "total_mw": float}
+            List of dicts: {"source": str, "target_year": int|None, "total_mw": float}
         """
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -1697,7 +1699,7 @@ class Storage:
             """
             SELECT target_year, SUM(capacity_mw) as total_mw
             FROM hyperscaler_announcements
-            WHERE capacity_mw IS NOT NULL AND target_year IS NOT NULL
+            WHERE capacity_mw IS NOT NULL AND capacity_mw > 0
             GROUP BY target_year
             ORDER BY target_year
             """
@@ -1714,7 +1716,7 @@ class Storage:
             """
             SELECT target_year, SUM(capacity_mw) as total_mw
             FROM pe_datacenter_announcements
-            WHERE capacity_mw IS NOT NULL AND target_year IS NOT NULL
+            WHERE capacity_mw IS NOT NULL AND capacity_mw > 0
             GROUP BY target_year
             ORDER BY target_year
             """
