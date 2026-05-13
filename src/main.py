@@ -249,6 +249,15 @@ def run_tracker(dry_run: bool = False) -> bool:
     print("=" * 60)
     print("Company News & Financial Tracker")
     today = get_houston_date()
+
+    # Skip weekends (Saturday=5, Sunday=6)
+    if today.weekday() in (5, 6):
+        day_name = "Saturday" if today.weekday() == 5 else "Sunday"
+        print(f"Date: {today.strftime('%B %d, %Y')} ({day_name})")
+        print("Skipping — emails do not run on weekends.")
+        print("=" * 60)
+        return True
+
     is_weekly_edition = is_friday()
     if is_weekly_edition:
         week_start = get_week_start_date()
