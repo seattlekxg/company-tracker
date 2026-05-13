@@ -1,11 +1,14 @@
 """Claude API integration for generating summaries."""
 
+import time
 from datetime import date
 from typing import Optional
 
 import anthropic
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+from anthropic.types.messages.batch_create_params import Request
 
-from .config import Company, config
+from .config import MODEL_HAIKU, MODEL_SONNET, Company, config
 from .storage import FinancialSnapshot, NewsArticle
 
 
@@ -18,89 +21,439 @@ class Summarizer:
             raise ValueError("Anthropic API key is required")
         self.client = anthropic.Anthropic(api_key=self.api_key)
 
-    def filter_relevant_articles(
-        self,
-        company_name: str,
-        articles: list[NewsArticle]
-    ) -> list[NewsArticle]:
-        """Filter articles to only those relevant to data center infrastructure.
+    # ========== Helper: extract text from response ==========
+
+    @staticmethod
+    def _extract_text(message) -> str:
+        """Extract text content from an API response message."""
+        parts = []
+        for block in message.content:
+            if block.type == "text":
+                parts.append(block.text)
+        return "".join(parts)
+
+    # ========== Batch Helpers ==========
+
+    def submit_batch(self, requests: list[Request]) -> str:
+        """Submit a batch of requests to the Anthropic Batch API.
 
         Args:
-            company_name: Name of the company.
-            articles: List of articles to filter.
+            requests: List of Request objects for the batch.
 
         Returns:
-            List of relevant articles.
+            The batch ID string.
         """
-        if not articles:
-            return []
+        batch = self.client.messages.batches.create(requests=requests)
+        return batch.id
 
-        # Build a batch prompt for efficiency
+    def poll_batch(self, batch_id: str, poll_interval: int = 30) -> None:
+        """Poll a batch until it finishes processing.
+
+        Args:
+            batch_id: The batch ID to poll.
+            poll_interval: Seconds between poll attempts.
+        """
+        while True:
+            batch = self.client.messages.batches.retrieve(batch_id)
+            if batch.processing_status == "ended":
+                print(f"  Batch {batch_id} complete: "
+                      f"{batch.request_counts.succeeded} succeeded, "
+                      f"{batch.request_counts.errored} errored")
+                return
+            print(f"  Batch {batch_id}: {batch.processing_status} "
+                  f"({batch.request_counts.processing} processing)")
+            time.sleep(poll_interval)
+
+    def get_batch_results(self, batch_id: str) -> dict[str, str]:
+        """Retrieve results from a completed batch.
+
+        Args:
+            batch_id: The batch ID to retrieve results from.
+
+        Returns:
+            Dict mapping custom_id to response text for succeeded results.
+        """
+        results = {}
+        for result in self.client.messages.batches.results(batch_id):
+            if result.result.type == "succeeded":
+                text = self._extract_text(result.result.message)
+                results[result.custom_id] = text
+            else:
+                print(f"    Batch item {result.custom_id} failed: {result.result.type}")
+        return results
+
+    # ========== 1. Filter Relevant Articles ==========
+
+    def _build_filter_params(
+        self, company_name: str, articles: list[NewsArticle]
+    ) -> dict:
+        """Build API call parameters for article filtering."""
         articles_text = ""
         for i, article in enumerate(articles):
             title = article.title or "No title"
             desc = (article.description or "")[:200]
             articles_text += f"\n{i+1}. Title: {title}\n   Description: {desc}\n"
 
-        prompt = f"""You are filtering news articles for {company_name}, a company in the data center infrastructure space.
+        system_text = (
+            f"You are filtering news articles for {company_name}, a company in the data center infrastructure space.\n\n"
+            f"Review the articles and identify which ones are RELEVANT to:\n"
+            f"- {company_name}'s business in data centers, power systems, cooling, or infrastructure\n"
+            f"- Data center industry news involving {company_name}\n"
+            f"- {company_name}'s products/services for data centers (UPS, generators, cooling, power distribution)\n"
+            f"- Financial news specifically about {company_name} (earnings, contracts, partnerships)\n\n"
+            f"EXCLUDE articles that:\n"
+            f"- Mention \"{company_name}\" but are about unrelated topics (politics, sports, other industries)\n"
+            f"- Are about different companies or people with similar names\n"
+            f"- Have no clear connection to data center infrastructure business\n\n"
+            f"Return ONLY the numbers of relevant articles as a comma-separated list.\n"
+            f"If no articles are relevant, return \"NONE\".\n"
+            f"Example response: 1, 3, 5"
+        )
 
-Review these articles and identify which ones are RELEVANT to:
-- {company_name}'s business in data centers, power systems, cooling, or infrastructure
-- Data center industry news involving {company_name}
-- {company_name}'s products/services for data centers (UPS, generators, cooling, power distribution)
-- Financial news specifically about {company_name} (earnings, contracts, partnerships)
+        return {
+            "model": MODEL_HAIKU,
+            "max_tokens": 100,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": f"Articles to review:\n{articles_text}"}
+            ],
+        }
 
-EXCLUDE articles that:
-- Mention "{company_name}" but are about unrelated topics (politics, sports, other industries)
-- Are about different companies or people with similar names
-- Have no clear connection to data center infrastructure business
+    def _parse_filter_response(
+        self, response_text: str, articles: list[NewsArticle]
+    ) -> list[NewsArticle]:
+        """Parse the filter response into a list of relevant articles."""
+        response_text = response_text.strip().upper()
 
-Articles to review:
-{articles_text}
-
-Return ONLY the numbers of relevant articles as a comma-separated list.
-If no articles are relevant, return "NONE".
-Example response: 1, 3, 5
-"""
+        if response_text == "NONE" or not response_text:
+            return []
 
         try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=100,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            relevant_indices = [
+                int(n.strip()) - 1
+                for n in response_text.replace(" ", "").split(",")
+                if n.strip().isdigit()
+            ]
+            return [
+                articles[i] for i in relevant_indices
+                if 0 <= i < len(articles)
+            ]
+        except (ValueError, IndexError):
+            return articles
 
-            response_text = ""
-            for block in message.content:
-                if block.type == "text":
-                    response_text += block.text
+    def filter_relevant_articles(
+        self,
+        company_name: str,
+        articles: list[NewsArticle]
+    ) -> list[NewsArticle]:
+        """Filter articles to only those relevant to data center infrastructure."""
+        if not articles:
+            return []
 
-            response_text = response_text.strip().upper()
-
-            if response_text == "NONE" or not response_text:
-                return []
-
-            # Parse the numbers
-            try:
-                relevant_indices = [
-                    int(n.strip()) - 1
-                    for n in response_text.replace(" ", "").split(",")
-                    if n.strip().isdigit()
-                ]
-                return [
-                    articles[i] for i in relevant_indices
-                    if 0 <= i < len(articles)
-                ]
-            except (ValueError, IndexError):
-                # If parsing fails, return all articles as fallback
-                return articles
-
+        try:
+            params = self._build_filter_params(company_name, articles)
+            message = self.client.messages.create(**params)
+            response_text = self._extract_text(message)
+            return self._parse_filter_response(response_text, articles)
         except Exception as e:
             print(f"    Error filtering articles: {e}")
-            # On error, return all articles as fallback
             return articles
+
+    # ========== 2. Analyze SEC Filing ==========
+
+    def _build_sec_filing_params(self, filing, filing_content: str) -> dict:
+        """Build API call parameters for SEC filing analysis."""
+        max_content_length = 30000
+        if len(filing_content) > max_content_length:
+            filing_content = filing_content[:max_content_length] + "\n...[truncated]"
+
+        system_text = (
+            f"You are analyzing SEC {filing.form_type} filings from {filing.company_name} ({filing.ticker}).\n\n"
+            "Focus specifically on:\n"
+            "1. Any mentions of data centers, data center infrastructure, or related products\n"
+            "2. Revenue or business segments related to power management, UPS systems, generators, "
+            "cooling systems, or electrical infrastructure for data centers\n"
+            "3. Significant business changes, risks, or opportunities related to data center markets\n"
+            "4. Any partnerships, contracts, or expansions in the data center space\n"
+            "5. Forward-looking statements about data center business\n\n"
+            'If there is NO data center-related content, simply state "No significant data center-related content found."\n\n'
+            "Be concise - provide a 2-4 sentence summary of the most relevant findings."
+        )
+
+        return {
+            "model": MODEL_SONNET,
+            "max_tokens": 500,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": f"Filing Content:\n{filing_content}\n\nSummary:"}
+            ],
+        }
+
+    @staticmethod
+    def _parse_sec_filing_response(response_text: str) -> str:
+        """Parse SEC filing analysis response."""
+        return response_text.strip()
+
+    def analyze_sec_filing(self, filing, filing_content: str) -> str:
+        """Analyze an SEC filing for data center-related content."""
+        try:
+            params = self._build_sec_filing_params(filing, filing_content)
+            message = self.client.messages.create(**params)
+            return self._parse_sec_filing_response(self._extract_text(message))
+        except Exception as e:
+            print(f"Error analyzing SEC filing: {e}")
+            return "Error analyzing filing content"
+
+    # ========== 3. Analyze Earnings Transcript ==========
+
+    def _build_transcript_params(self, transcript, content: str) -> dict:
+        """Build API call parameters for earnings transcript analysis."""
+        max_content_length = 30000
+        if len(content) > max_content_length:
+            content = content[:max_content_length] + "\n...[truncated]"
+
+        system_text = (
+            f"You are analyzing earnings call transcripts from {transcript.ticker} ({transcript.quarter}).\n\n"
+            "Focus specifically on extracting signals relevant to data center infrastructure supply chain:\n"
+            "1. **Backlog and Orders**: Any mentions of order backlog, bookings, or pipeline for data center products\n"
+            "2. **Lead Times**: Discussion of delivery lead times, production capacity, or supply constraints\n"
+            "3. **Capacity Utilization**: Factory utilization rates, production ramp-up, or capacity expansion plans\n"
+            "4. **Data Center Demand**: Commentary on hyperscaler demand, data center market trends, or AI infrastructure needs\n"
+            "5. **Guidance and Outlook**: Forward-looking statements about data center business segments\n\n"
+            'If there is NO relevant data center supply chain content, simply state '
+            '"No significant data center supply chain signals found."\n\n'
+            "Be concise - provide a 2-4 sentence summary of the most actionable supply chain insights."
+        )
+
+        return {
+            "model": MODEL_SONNET,
+            "max_tokens": 500,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": f"Transcript Content:\n{content}\n\nSummary:"}
+            ],
+        }
+
+    @staticmethod
+    def _parse_transcript_response(response_text: str) -> str:
+        """Parse transcript analysis response."""
+        return response_text.strip()
+
+    def analyze_earnings_transcript(self, transcript, content: str) -> str:
+        """Analyze an earnings call transcript for data center-related insights."""
+        try:
+            params = self._build_transcript_params(transcript, content)
+            message = self.client.messages.create(**params)
+            return self._parse_transcript_response(self._extract_text(message))
+        except Exception as e:
+            print(f"Error analyzing transcript: {e}")
+            return "Error analyzing transcript content"
+
+    # ========== MW Tag Parsing ==========
+
+    def _parse_mw_tags(self, text: str) -> dict:
+        """Parse CAPACITY_MW and TARGET_YEAR tags from AI response text."""
+        import re
+
+        capacity_mw = None
+        target_year = None
+        summary_lines = []
+
+        for line in text.strip().split("\n"):
+            stripped = line.strip()
+            mw_match = re.match(r"^CAPACITY_MW:\s*(.+)$", stripped, re.IGNORECASE)
+            year_match = re.match(r"^TARGET_YEAR:\s*(.+)$", stripped, re.IGNORECASE)
+
+            if mw_match:
+                val = mw_match.group(1).strip()
+                if val.upper() != "UNKNOWN":
+                    try:
+                        capacity_mw = float(val.replace(",", ""))
+                    except ValueError:
+                        pass
+            elif year_match:
+                val = year_match.group(1).strip()
+                if val.upper() != "UNKNOWN":
+                    try:
+                        target_year = int(val)
+                    except ValueError:
+                        pass
+            else:
+                summary_lines.append(line)
+
+        return {
+            "summary": "\n".join(summary_lines).strip(),
+            "capacity_mw": capacity_mw,
+            "target_year": target_year,
+        }
+
+    # ========== 4. Analyze Hyperscaler Announcement ==========
+
+    _HYPERSCALER_SYSTEM = (
+        "You are analyzing hyperscaler data center announcements.\n\n"
+        "Extract key details relevant to data center infrastructure suppliers:\n"
+        "1. **Location**: Where is the data center being built or expanded?\n"
+        "2. **Scale**: What is the size (MW, square footage, investment amount)?\n"
+        "3. **Timeline**: When is construction expected and completion planned?\n"
+        "4. **Supplier Impact**: Which types of suppliers might benefit (power, cooling, connectivity)?\n\n"
+        "Be concise - provide a 2-3 sentence summary with the most relevant facts for infrastructure suppliers.\n\n"
+        "After your summary, on separate lines, output these two structured tags:\n"
+        "CAPACITY_MW: <total MW of datacenter capacity announced, as a number, or UNKNOWN if not mentioned>\n"
+        "TARGET_YEAR: <year when capacity is expected to be operational, as a 4-digit year, or UNKNOWN if not mentioned>"
+    )
+
+    def _build_hyperscaler_params(self, announcement) -> dict:
+        """Build API call parameters for hyperscaler announcement analysis."""
+        content = f"Title: {announcement.title}\n"
+        if announcement.description:
+            content += f"Description: {announcement.description}"
+
+        return {
+            "model": MODEL_SONNET,
+            "max_tokens": 350,
+            "system": [
+                {
+                    "type": "text",
+                    "text": f"This is a {announcement.hyperscaler} announcement.\n\n" + self._HYPERSCALER_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": f"Article:\n{content}\n\nSummary:"}
+            ],
+        }
+
+    def _parse_hyperscaler_response(self, response_text: str) -> dict:
+        """Parse hyperscaler analysis response."""
+        return self._parse_mw_tags(response_text)
+
+    def analyze_hyperscaler_announcement(self, announcement) -> dict:
+        """Analyze a hyperscaler data center announcement."""
+        try:
+            params = self._build_hyperscaler_params(announcement)
+            message = self.client.messages.create(**params)
+            return self._parse_hyperscaler_response(self._extract_text(message))
+        except Exception as e:
+            print(f"Error analyzing hyperscaler announcement: {e}")
+            return {"summary": "Error analyzing announcement", "capacity_mw": None, "target_year": None}
+
+    # ========== 5. Analyze PE Announcement ==========
+
+    _PE_SYSTEM = (
+        "You are analyzing Private Equity data center investment announcements.\n\n"
+        "Extract key details relevant to data center infrastructure market:\n"
+        "1. **Deal Type**: Is this an acquisition, expansion, new investment, or partnership?\n"
+        "2. **Target/Portfolio**: What data center assets or companies are involved?\n"
+        "3. **Scale**: What is the deal value, capacity (MW), or size?\n"
+        "4. **Location**: Where are the assets located?\n"
+        "5. **Market Signal**: What does this indicate about PE firm appetite for data center investments?\n\n"
+        "Be concise - provide a 2-3 sentence summary with the most relevant facts for understanding PE activity in data centers.\n\n"
+        "After your summary, on separate lines, output these two structured tags:\n"
+        "CAPACITY_MW: <total MW of datacenter capacity announced, as a number, or UNKNOWN if not mentioned>\n"
+        "TARGET_YEAR: <year when capacity is expected to be operational, as a 4-digit year, or UNKNOWN if not mentioned>"
+    )
+
+    def _build_pe_params(self, announcement) -> dict:
+        """Build API call parameters for PE announcement analysis."""
+        content = f"Title: {announcement.title}\n"
+        if announcement.description:
+            content += f"Description: {announcement.description}"
+
+        return {
+            "model": MODEL_SONNET,
+            "max_tokens": 350,
+            "system": [
+                {
+                    "type": "text",
+                    "text": f"This is a {announcement.pe_firm} announcement.\n\n" + self._PE_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": f"Article:\n{content}\n\nSummary:"}
+            ],
+        }
+
+    def _parse_pe_response(self, response_text: str) -> dict:
+        """Parse PE analysis response."""
+        return self._parse_mw_tags(response_text)
+
+    def analyze_pe_announcement(self, announcement) -> dict:
+        """Analyze a Private Equity data center investment announcement."""
+        try:
+            params = self._build_pe_params(announcement)
+            message = self.client.messages.create(**params)
+            return self._parse_pe_response(self._extract_text(message))
+        except Exception as e:
+            print(f"Error analyzing PE announcement: {e}")
+            return {"summary": "Error analyzing announcement", "capacity_mw": None, "target_year": None}
+
+    # ========== 6. Extract MW from Summary ==========
+
+    _MW_EXTRACTION_SYSTEM = (
+        "You extract structured data from data center announcement summaries.\n\n"
+        "From the given summary, extract:\n"
+        "1. The total MW of datacenter capacity announced (if mentioned)\n"
+        "2. The target year when the capacity is expected to be operational (if mentioned)\n\n"
+        "Respond with exactly two lines:\n"
+        "CAPACITY_MW: <number or UNKNOWN>\n"
+        "TARGET_YEAR: <4-digit year or UNKNOWN>"
+    )
+
+    def _build_mw_extraction_params(self, content_summary: str) -> dict:
+        """Build API call parameters for MW extraction."""
+        return {
+            "model": MODEL_HAIKU,
+            "max_tokens": 50,
+            "system": [
+                {
+                    "type": "text",
+                    "text": self._MW_EXTRACTION_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": f"Summary:\n{content_summary}"}
+            ],
+        }
+
+    def _parse_mw_extraction_response(self, response_text: str) -> dict:
+        """Parse MW extraction response."""
+        parsed = self._parse_mw_tags(response_text)
+        return {
+            "capacity_mw": parsed["capacity_mw"],
+            "target_year": parsed["target_year"],
+        }
+
+    def extract_mw_from_summary(self, content_summary: str) -> dict:
+        """Extract MW capacity and target year from an existing summary text."""
+        try:
+            params = self._build_mw_extraction_params(content_summary)
+            message = self.client.messages.create(**params)
+            return self._parse_mw_extraction_response(self._extract_text(message))
+        except Exception as e:
+            print(f"Error extracting MW from summary: {e}")
+            return {"capacity_mw": None, "target_year": None}
+
+    # ========== Non-Batchable Methods ==========
 
     def _format_company_data(
         self,
@@ -143,7 +496,7 @@ Example response: 1, 3, 5
         # SEC Filings
         if filings:
             lines.append(f"\n### SEC Filings ({len(filings)} recent filings)")
-            for filing in filings[:5]:  # Limit to 5 filings per company
+            for filing in filings[:5]:
                 filed_date = filing.filed_at.strftime("%Y-%m-%d") if filing.filed_at else "Unknown date"
                 lines.append(f"- **{filing.form_type}** (Filed: {filed_date})")
                 if filing.description:
@@ -158,7 +511,7 @@ Example response: 1, 3, 5
         # Earnings Call Transcripts
         if transcripts:
             lines.append(f"\n### Earnings Call Transcripts ({len(transcripts)} recent)")
-            for transcript in transcripts[:2]:  # Limit to 2 transcripts per company
+            for transcript in transcripts[:2]:
                 lines.append(f"- **{transcript.quarter}** ({transcript.ticker})")
                 if transcript.content_summary:
                     lines.append(f"  AI Analysis: {transcript.content_summary}")
@@ -169,11 +522,10 @@ Example response: 1, 3, 5
         # News articles
         lines.append(f"\n### News ({len(articles)} articles)")
         if articles:
-            for article in articles[:5]:  # Limit to 5 articles per company
+            for article in articles[:5]:
                 source = f" ({article.source})" if article.source else ""
                 lines.append(f"- {article.title}{source}")
                 if article.description:
-                    # Truncate long descriptions
                     desc = article.description[:200]
                     if len(article.description) > 200:
                         desc += "..."
@@ -196,306 +548,6 @@ Example response: 1, 3, 5
         else:
             return f"${num:.2f}"
 
-    def analyze_sec_filing(self, filing, filing_content: str) -> str:
-        """Analyze an SEC filing for data center-related content.
-
-        Args:
-            filing: The SECFiling object.
-            filing_content: The text content of the filing.
-
-        Returns:
-            AI-generated summary focused on data center relevance.
-        """
-        # Truncate content to avoid token limits
-        max_content_length = 30000
-        if len(filing_content) > max_content_length:
-            filing_content = filing_content[:max_content_length] + "\n...[truncated]"
-
-        prompt = f"""Analyze this SEC {filing.form_type} filing from {filing.company_name} ({filing.ticker}).
-
-Focus specifically on:
-1. Any mentions of data centers, data center infrastructure, or related products
-2. Revenue or business segments related to power management, UPS systems, generators, cooling systems, or electrical infrastructure for data centers
-3. Significant business changes, risks, or opportunities related to data center markets
-4. Any partnerships, contracts, or expansions in the data center space
-5. Forward-looking statements about data center business
-
-If there is NO data center-related content, simply state "No significant data center-related content found."
-
-Be concise - provide a 2-4 sentence summary of the most relevant findings.
-
-Filing Content:
-{filing_content}
-
-Summary:"""
-
-        try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=500,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            summary = ""
-            for block in message.content:
-                if block.type == "text":
-                    summary += block.text
-
-            return summary.strip()
-
-        except Exception as e:
-            print(f"Error analyzing SEC filing: {e}")
-            return "Error analyzing filing content"
-
-    def analyze_earnings_transcript(self, transcript, content: str) -> str:
-        """Analyze an earnings call transcript for data center-related insights.
-
-        Args:
-            transcript: The EarningsTranscript object.
-            content: The transcript text content.
-
-        Returns:
-            AI-generated summary focused on supply chain signals.
-        """
-        # Truncate content to avoid token limits
-        max_content_length = 30000
-        if len(content) > max_content_length:
-            content = content[:max_content_length] + "\n...[truncated]"
-
-        prompt = f"""Analyze this earnings call transcript from {transcript.ticker} ({transcript.quarter}).
-
-Focus specifically on extracting signals relevant to data center infrastructure supply chain:
-1. **Backlog and Orders**: Any mentions of order backlog, bookings, or pipeline for data center products
-2. **Lead Times**: Discussion of delivery lead times, production capacity, or supply constraints
-3. **Capacity Utilization**: Factory utilization rates, production ramp-up, or capacity expansion plans
-4. **Data Center Demand**: Commentary on hyperscaler demand, data center market trends, or AI infrastructure needs
-5. **Guidance and Outlook**: Forward-looking statements about data center business segments
-
-If there is NO relevant data center supply chain content, simply state "No significant data center supply chain signals found."
-
-Be concise - provide a 2-4 sentence summary of the most actionable supply chain insights.
-
-Transcript Content:
-{content}
-
-Summary:"""
-
-        try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=500,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            summary = ""
-            for block in message.content:
-                if block.type == "text":
-                    summary += block.text
-
-            return summary.strip()
-
-        except Exception as e:
-            print(f"Error analyzing transcript: {e}")
-            return "Error analyzing transcript content"
-
-    def _parse_mw_tags(self, text: str) -> dict:
-        """Parse CAPACITY_MW and TARGET_YEAR tags from AI response text.
-
-        Returns:
-            dict with "summary", "capacity_mw" (float|None), "target_year" (int|None).
-        """
-        import re
-
-        capacity_mw = None
-        target_year = None
-        summary_lines = []
-
-        for line in text.strip().split("\n"):
-            stripped = line.strip()
-            mw_match = re.match(r"^CAPACITY_MW:\s*(.+)$", stripped, re.IGNORECASE)
-            year_match = re.match(r"^TARGET_YEAR:\s*(.+)$", stripped, re.IGNORECASE)
-
-            if mw_match:
-                val = mw_match.group(1).strip()
-                if val.upper() != "UNKNOWN":
-                    try:
-                        capacity_mw = float(val.replace(",", ""))
-                    except ValueError:
-                        pass
-            elif year_match:
-                val = year_match.group(1).strip()
-                if val.upper() != "UNKNOWN":
-                    try:
-                        target_year = int(val)
-                    except ValueError:
-                        pass
-            else:
-                summary_lines.append(line)
-
-        return {
-            "summary": "\n".join(summary_lines).strip(),
-            "capacity_mw": capacity_mw,
-            "target_year": target_year,
-        }
-
-    def analyze_hyperscaler_announcement(self, announcement) -> dict:
-        """Analyze a hyperscaler data center announcement.
-
-        Args:
-            announcement: The HyperscalerAnnouncement object.
-
-        Returns:
-            Dict with "summary" (str), "capacity_mw" (float|None),
-            "target_year" (int|None).
-        """
-        content = f"Title: {announcement.title}\n"
-        if announcement.description:
-            content += f"Description: {announcement.description}"
-
-        prompt = f"""Analyze this {announcement.hyperscaler} data center announcement.
-
-Extract key details relevant to data center infrastructure suppliers:
-1. **Location**: Where is the data center being built or expanded?
-2. **Scale**: What is the size (MW, square footage, investment amount)?
-3. **Timeline**: When is construction expected and completion planned?
-4. **Supplier Impact**: Which types of suppliers might benefit (power, cooling, connectivity)?
-
-Be concise - provide a 2-3 sentence summary with the most relevant facts for infrastructure suppliers.
-
-After your summary, on separate lines, output these two structured tags:
-CAPACITY_MW: <total MW of datacenter capacity announced, as a number, or UNKNOWN if not mentioned>
-TARGET_YEAR: <year when capacity is expected to be operational, as a 4-digit year, or UNKNOWN if not mentioned>
-
-Article:
-{content}
-
-Summary:"""
-
-        try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=350,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            response_text = ""
-            for block in message.content:
-                if block.type == "text":
-                    response_text += block.text
-
-            return self._parse_mw_tags(response_text)
-
-        except Exception as e:
-            print(f"Error analyzing hyperscaler announcement: {e}")
-            return {"summary": "Error analyzing announcement", "capacity_mw": None, "target_year": None}
-
-    def analyze_pe_announcement(self, announcement) -> dict:
-        """Analyze a Private Equity data center investment announcement.
-
-        Args:
-            announcement: The PEDatacenterAnnouncement object.
-
-        Returns:
-            Dict with "summary" (str), "capacity_mw" (float|None),
-            "target_year" (int|None).
-        """
-        content = f"Title: {announcement.title}\n"
-        if announcement.description:
-            content += f"Description: {announcement.description}"
-
-        prompt = f"""Analyze this {announcement.pe_firm} data center investment announcement.
-
-Extract key details relevant to data center infrastructure market:
-1. **Deal Type**: Is this an acquisition, expansion, new investment, or partnership?
-2. **Target/Portfolio**: What data center assets or companies are involved?
-3. **Scale**: What is the deal value, capacity (MW), or size?
-4. **Location**: Where are the assets located?
-5. **Market Signal**: What does this indicate about PE firm appetite for data center investments?
-
-Be concise - provide a 2-3 sentence summary with the most relevant facts for understanding PE activity in data centers.
-
-After your summary, on separate lines, output these two structured tags:
-CAPACITY_MW: <total MW of datacenter capacity announced, as a number, or UNKNOWN if not mentioned>
-TARGET_YEAR: <year when capacity is expected to be operational, as a 4-digit year, or UNKNOWN if not mentioned>
-
-Article:
-{content}
-
-Summary:"""
-
-        try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=350,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            response_text = ""
-            for block in message.content:
-                if block.type == "text":
-                    response_text += block.text
-
-            return self._parse_mw_tags(response_text)
-
-        except Exception as e:
-            print(f"Error analyzing PE announcement: {e}")
-            return {"summary": "Error analyzing announcement", "capacity_mw": None, "target_year": None}
-
-    def extract_mw_from_summary(self, content_summary: str) -> dict:
-        """Extract MW capacity and target year from an existing summary text.
-
-        Used for backfilling existing announcements that already have summaries
-        but no structured MW data.
-
-        Args:
-            content_summary: The existing AI-generated summary text.
-
-        Returns:
-            Dict with "capacity_mw" (float|None) and "target_year" (int|None).
-        """
-        prompt = f"""From the following data center announcement summary, extract:
-1. The total MW of datacenter capacity announced (if mentioned)
-2. The target year when the capacity is expected to be operational (if mentioned)
-
-Respond with exactly two lines:
-CAPACITY_MW: <number or UNKNOWN>
-TARGET_YEAR: <4-digit year or UNKNOWN>
-
-Summary:
-{content_summary}"""
-
-        try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=50,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            response_text = ""
-            for block in message.content:
-                if block.type == "text":
-                    response_text += block.text
-
-            parsed = self._parse_mw_tags(response_text)
-            return {
-                "capacity_mw": parsed["capacity_mw"],
-                "target_year": parsed["target_year"],
-            }
-
-        except Exception as e:
-            print(f"Error extracting MW from summary: {e}")
-            return {"capacity_mw": None, "target_year": None}
-
     def generate_seasonal_summary(
         self,
         quarter: str,
@@ -508,23 +560,7 @@ Summary:
         hyperscaler_announcements: list = None,
         pe_announcements: list = None
     ) -> dict:
-        """Generate a structured seasonal earnings summary for PPT generation.
-
-        Args:
-            quarter: e.g., "Q1 2025"
-            companies: List of companies.
-            transcripts_by_company: Dict mapping company name to transcripts.
-            filings_by_company: Dict mapping company name to SEC filings.
-            articles_by_company: Dict mapping company name to news articles.
-            snapshots_start: Dict mapping company name to start-of-season snapshot.
-            snapshots_end: Dict mapping company name to end-of-season snapshot.
-            hyperscaler_announcements: List of hyperscaler announcements.
-            pe_announcements: List of PE announcements.
-
-        Returns:
-            Dict with keys: executive_summary, sector_themes,
-            company_highlights (dict), outlook, hyperscaler_summary, pe_summary
-        """
+        """Generate a structured seasonal earnings summary for PPT generation."""
         if hyperscaler_announcements is None:
             hyperscaler_announcements = []
         if pe_announcements is None:
@@ -537,7 +573,6 @@ Summary:
                 continue
             lines = [f"\n## {company.name} ({company.ticker})"]
 
-            # Earnings transcript summary
             transcripts = transcripts_by_company.get(company.name, [])
             if transcripts:
                 lines.append("\n### Earnings Call Insights")
@@ -547,7 +582,6 @@ Summary:
             else:
                 lines.append("\n### Earnings Call: No transcript available")
 
-            # SEC filings
             filings = filings_by_company.get(company.name, [])
             if filings:
                 lines.append(f"\n### SEC Filings ({len(filings)})")
@@ -555,14 +589,12 @@ Summary:
                     if f.content_summary:
                         lines.append(f"- {f.form_type}: {f.content_summary}")
 
-            # Stock performance
             start_snap = snapshots_start.get(company.name)
             end_snap = snapshots_end.get(company.name)
             if start_snap and start_snap.price and end_snap and end_snap.price:
                 change = ((end_snap.price - start_snap.price) / start_snap.price) * 100
                 lines.append(f"\n### Stock: ${start_snap.price:.2f} -> ${end_snap.price:.2f} ({change:+.1f}%)")
 
-            # Key news
             articles = articles_by_company.get(company.name, [])
             if articles:
                 lines.append(f"\n### Key News ({len(articles)} articles)")
@@ -573,7 +605,6 @@ Summary:
 
         combined_data = "\n".join(data_sections)
 
-        # Hyperscaler context
         hyperscaler_context = ""
         if hyperscaler_announcements:
             hyperscaler_context = "\n\n# Hyperscaler Data Center Activity\n"
@@ -583,7 +614,6 @@ Summary:
                 if ann.content_summary:
                     hyperscaler_context += f"  Analysis: {ann.content_summary}\n"
 
-        # PE context
         pe_context = ""
         if pe_announcements:
             pe_context = "\n\n# Private Equity Data Center Activity\n"
@@ -593,82 +623,76 @@ Summary:
                 if ann.content_summary:
                     pe_context += f"  Analysis: {ann.content_summary}\n"
 
-        prompt = f"""You are a senior financial analyst creating a {quarter} earnings season summary for data center infrastructure companies.
+        system_text = (
+            f"You are a senior financial analyst creating a {quarter} earnings season summary "
+            "for data center infrastructure companies.\n\n"
+            "Please create a comprehensive, structured analysis with the following EXACT sections. "
+            "Each section should be formatted with bullet points for clarity.\n\n"
+            "IMPORTANT: Return your analysis in the following exact format with these section headers:\n\n"
+            "===EXECUTIVE_SUMMARY===\n"
+            f"Write 5-8 bullet points providing a high-level overview of the {quarter} earnings season. Cover:\n"
+            "- Overall earnings quality across tracked companies\n"
+            "- Key demand trends (especially hyperscaler/AI infrastructure demand)\n"
+            "- Supply chain conditions (lead times, capacity, backlogs)\n"
+            "- Notable stock market performance patterns\n"
+            "- Any significant corporate actions or strategic shifts\n\n"
+            "===SECTOR_THEMES===\n"
+            "Write 6-10 bullet points identifying the major themes across all earnings calls. Focus on:\n"
+            "- Common demand drivers mentioned across multiple companies\n"
+            "- Shared supply chain challenges or improvements\n"
+            "- Pricing trends and margin dynamics\n"
+            "- Technology/product evolution themes\n"
+            "- Geographic expansion patterns\n"
+            "- Competitive dynamics\n\n"
+            "===COMPANY_HIGHLIGHTS===\n"
+            "For each company that reported earnings, write a section formatted as:\n"
+            "### Company Name\n"
+            "- 3-5 bullet points covering: earnings call key takeaways, stock reaction, SEC filing insights, and any notable news\n\n"
+            "===HYPERSCALER_SUMMARY===\n"
+            "Write 5-8 bullet points summarizing hyperscaler data center activity during the season:\n"
+            "- Major expansion announcements and their scale\n"
+            "- Geographic focus areas\n"
+            "- Implications for infrastructure suppliers\n"
+            "- Demand signals and capacity planning\n\n"
+            "===PE_SUMMARY===\n"
+            "Write 4-6 bullet points summarizing Private Equity activity:\n"
+            "- Key deals and investments\n"
+            "- Asset types being targeted\n"
+            "- Deal sizes and valuations\n"
+            "- Market appetite signals\n\n"
+            "===OUTLOOK===\n"
+            "Write 5-8 bullet points on forward guidance themes:\n"
+            "- Consensus outlook from earnings calls\n"
+            "- Key risks and uncertainties\n"
+            "- Growth drivers for next quarter\n"
+            "- Items to watch going forward"
+        )
 
-Below is all the data from this earnings season. Please create a comprehensive, structured analysis with the following EXACT sections. Each section should be formatted with bullet points for clarity.
-
-IMPORTANT: Return your analysis in the following exact format with these section headers:
-
-===EXECUTIVE_SUMMARY===
-Write 5-8 bullet points providing a high-level overview of the {quarter} earnings season. Cover:
-- Overall earnings quality across tracked companies
-- Key demand trends (especially hyperscaler/AI infrastructure demand)
-- Supply chain conditions (lead times, capacity, backlogs)
-- Notable stock market performance patterns
-- Any significant corporate actions or strategic shifts
-
-===SECTOR_THEMES===
-Write 6-10 bullet points identifying the major themes across all earnings calls. Focus on:
-- Common demand drivers mentioned across multiple companies
-- Shared supply chain challenges or improvements
-- Pricing trends and margin dynamics
-- Technology/product evolution themes
-- Geographic expansion patterns
-- Competitive dynamics
-
-===COMPANY_HIGHLIGHTS===
-For each company that reported earnings, write a section formatted as:
-### Company Name
-- 3-5 bullet points covering: earnings call key takeaways, stock reaction, SEC filing insights, and any notable news
-
-===HYPERSCALER_SUMMARY===
-Write 5-8 bullet points summarizing hyperscaler data center activity during the season:
-- Major expansion announcements and their scale
-- Geographic focus areas
-- Implications for infrastructure suppliers
-- Demand signals and capacity planning
-
-===PE_SUMMARY===
-Write 4-6 bullet points summarizing Private Equity activity:
-- Key deals and investments
-- Asset types being targeted
-- Deal sizes and valuations
-- Market appetite signals
-
-===OUTLOOK===
-Write 5-8 bullet points on forward guidance themes:
-- Consensus outlook from earnings calls
-- Key risks and uncertainties
-- Growth drivers for next quarter
-- Items to watch going forward
-
----
-
-# {quarter} Earnings Season Data
-
-{combined_data}
-{hyperscaler_context}
-{pe_context}
-
----
-
-Please generate the analysis now:"""
+        user_content = (
+            f"# {quarter} Earnings Season Data\n\n"
+            f"{combined_data}\n"
+            f"{hyperscaler_context}\n"
+            f"{pe_context}\n\n"
+            "---\n\n"
+            "Please generate the analysis now:"
+        )
 
         try:
             message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=MODEL_SONNET,
                 max_tokens=6000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_content}]
             )
 
-            response_text = ""
-            for block in message.content:
-                if block.type == "text":
-                    response_text += block.text
+            response_text = self._extract_text(message)
 
-            # Parse the structured response into sections
             result = {
                 "executive_summary": "",
                 "sector_themes": "",
@@ -687,7 +711,6 @@ Please generate the analysis now:"""
                 "===OUTLOOK===": "outlook",
             }
 
-            # Extract each section
             for marker, key in sections.items():
                 start_idx = response_text.find(marker)
                 if start_idx == -1:
@@ -695,7 +718,6 @@ Please generate the analysis now:"""
 
                 content_start = start_idx + len(marker)
 
-                # Find end of this section (next marker or end of text)
                 end_idx = len(response_text)
                 for other_marker in sections:
                     if other_marker == marker:
@@ -707,7 +729,6 @@ Please generate the analysis now:"""
                 section_content = response_text[content_start:end_idx].strip()
 
                 if key == "company_highlights_raw":
-                    # Parse per-company sections
                     result["company_highlights"] = self._parse_company_highlights(
                         section_content
                     )
@@ -736,7 +757,6 @@ Please generate the analysis now:"""
         for line in raw_text.split("\n"):
             stripped = line.strip()
             if stripped.startswith("### "):
-                # Save previous company
                 if current_company:
                     highlights[current_company] = "\n".join(current_lines).strip()
                 current_company = stripped[4:].strip()
@@ -744,7 +764,6 @@ Please generate the analysis now:"""
             elif current_company:
                 current_lines.append(line)
 
-        # Save last company
         if current_company:
             highlights[current_company] = "\n".join(current_lines).strip()
 
@@ -763,23 +782,7 @@ Please generate the analysis now:"""
         week_start_date: date = None,
         pe_announcements: list = None
     ) -> str:
-        """Generate an AI summary of all company data.
-
-        Args:
-            companies: List of companies.
-            articles_by_company: Dict mapping company name to articles.
-            snapshots_by_company: Dict mapping company name to financial snapshot.
-            filings_by_company: Dict mapping company name to SEC filings.
-            transcripts_by_company: Dict mapping company name to earnings transcripts.
-            hyperscaler_announcements: List of hyperscaler announcements.
-            target_date: The date for this summary.
-            is_weekly: If True, generate a weekly summary instead of daily.
-            week_start_date: Start date of the week (for weekly summaries).
-            pe_announcements: List of PE data center announcements.
-
-        Returns:
-            Generated summary text.
-        """
+        """Generate an AI summary of all company data."""
         if target_date is None:
             target_date = date.today()
 
@@ -812,7 +815,7 @@ Please generate the analysis now:"""
         hyperscaler_section = ""
         if hyperscaler_announcements:
             hyperscaler_section = "\n\n# Hyperscaler Data Center Activity\n"
-            for ann in hyperscaler_announcements[:10]:  # Limit to 10
+            for ann in hyperscaler_announcements[:10]:
                 hyperscaler_section += f"\n## {ann.hyperscaler}\n"
                 hyperscaler_section += f"- **{ann.title}**\n"
                 if ann.content_summary:
@@ -822,7 +825,7 @@ Please generate the analysis now:"""
         pe_section = ""
         if pe_announcements:
             pe_section = "\n\n# Private Equity Data Center Activity\n"
-            for ann in pe_announcements[:10]:  # Limit to 10
+            for ann in pe_announcements[:10]:
                 pe_section += f"\n## {ann.pe_firm}\n"
                 pe_section += f"- **{ann.title}**\n"
                 if ann.content_summary:
@@ -831,102 +834,70 @@ Please generate the analysis now:"""
         # Generate different prompts for daily vs weekly summaries
         if is_weekly:
             date_range_str = f"{week_start_date.strftime('%B %d')} - {target_date.strftime('%B %d, %Y')}"
-            prompt = f"""You are a financial analyst assistant specializing in data center infrastructure companies. Below is this week's ({date_range_str}) aggregated news, financial data, SEC filings, and earnings call insights for companies in the data center power and infrastructure space.
-
-Please create a professional WEEKLY SUMMARY with the following structure:
-
-1. **Week in Review** (3-4 sentences): Provide a high-level overview of the most significant developments across all tracked companies this week. Highlight major themes, trends, and any market-moving events.
-
-2. **Hyperscaler Demand Signals**: Summarize all hyperscaler (AWS, Google, Microsoft, Meta, Oracle) data center expansion announcements from this week. Note locations, scale, investment amounts, and potential supplier impact.
-
-3. **Private Equity Activity**: Summarize any Private Equity firm data center investments, acquisitions, or expansions. Note deal values, target assets, and what this signals about PE appetite for data center infrastructure.
-
-4. **Supplier Capacity Signals**: Compile earnings call insights about backlog, lead times, capacity utilization, or demand trends from tracked suppliers. Identify any patterns across multiple companies.
-
-5. **SEC Filing Summary**: Summarize important SEC filings from the week, especially those with data center-related content. Highlight any 10-Q/10-K quarterly results, material changes, or significant disclosures.
-
-6. **Weekly Market Performance**: Summarize stock performance across tracked companies. Identify biggest gainers/losers and any correlation with news events.
-
-7. **Company-by-Company Highlights**: For each company with noteworthy updates this week, provide a consolidated summary including:
-   - Key news developments (especially data center related)
-   - Earnings call insights (if available)
-   - SEC filing insights
-   - Weekly stock performance
-   - Notable patterns or concerns
-
-8. **Data Center Market Trends**: Identify broader themes, patterns, or emerging trends in the data center infrastructure market based on this week's information.
-
-9. **Looking Ahead**: Note any upcoming earnings calls, expected SEC filings, or events to watch next week.
-
-Focus on synthesizing the week's information into actionable insights. Identify patterns and connections across different data sources. Be comprehensive but organized.
-
----
-
-# This Week's Data ({date_range_str})
-
-{combined_data}
-{hyperscaler_section}
-{pe_section}
-
----
-
-Please generate the weekly summary:"""
+            system_text = (
+                "You are a financial analyst assistant specializing in data center infrastructure companies. "
+                "Create a professional WEEKLY SUMMARY with the following structure:\n\n"
+                "1. **Week in Review** (3-4 sentences)\n"
+                "2. **Hyperscaler Demand Signals**\n"
+                "3. **Private Equity Activity**\n"
+                "4. **Supplier Capacity Signals**\n"
+                "5. **SEC Filing Summary**\n"
+                "6. **Weekly Market Performance**\n"
+                "7. **Company-by-Company Highlights**\n"
+                "8. **Data Center Market Trends**\n"
+                "9. **Looking Ahead**\n\n"
+                "Focus on synthesizing the week's information into actionable insights. "
+                "Identify patterns and connections across different data sources. Be comprehensive but organized."
+            )
+            user_content = (
+                f"Below is this week's ({date_range_str}) aggregated news, financial data, "
+                "SEC filings, and earnings call insights.\n\n"
+                f"# This Week's Data ({date_range_str})\n\n"
+                f"{combined_data}\n"
+                f"{hyperscaler_section}\n"
+                f"{pe_section}\n\n"
+                "---\n\nPlease generate the weekly summary:"
+            )
         else:
-            prompt = f"""You are a financial analyst assistant specializing in data center infrastructure companies. Below is today's ({target_date.strftime('%B %d, %Y')}) news, financial data, SEC filings, and earnings call insights for companies in the data center power and infrastructure space.
-
-Please create a professional daily briefing summary with the following structure:
-
-1. **Executive Summary** (2-3 sentences): Highlight the most significant developments across all companies, with special attention to data center-related news, SEC disclosures, and earnings call signals.
-
-2. **Hyperscaler Demand Signals**: Summarize any hyperscaler (AWS, Google, Microsoft, Meta, Oracle) data center expansion announcements. Note locations, scale, and potential supplier impact.
-
-3. **Private Equity Activity**: Summarize any Private Equity firm data center investments, acquisitions, or expansions. Note deal values, target assets, and market implications.
-
-4. **Supplier Capacity Signals**: Highlight any earnings call insights about backlog, lead times, capacity utilization, or demand trends from tracked suppliers.
-
-5. **SEC Filing Highlights**: Summarize any important SEC filings, especially those with data center-related content. Note any material changes, risk factors, or business developments disclosed.
-
-6. **Market Movers**: List any companies with notable price movements (>3% change) or significant news.
-
-7. **Company Highlights**: For each company with noteworthy updates, provide a brief 1-2 sentence summary of:
-   - Key news developments (especially data center related)
-   - Earnings call insights (if available)
-   - SEC filing insights
-   - Stock performance context
-   - Any notable patterns or concerns
-
-8. **Data Center Market Insights**: Any trends or patterns relevant to the data center infrastructure market based on today's information.
-
-Focus on actionable insights and material information, particularly as it relates to data center products and markets. Be concise but comprehensive. If there's no significant news for a company, you can skip or briefly note "No significant updates."
-
----
-
-# Today's Data
-
-{combined_data}
-{hyperscaler_section}
-{pe_section}
-
----
-
-Please generate the daily briefing summary:"""
+            system_text = (
+                "You are a financial analyst assistant specializing in data center infrastructure companies. "
+                "Create a professional daily briefing summary with the following structure:\n\n"
+                "1. **Executive Summary** (2-3 sentences)\n"
+                "2. **Hyperscaler Demand Signals**\n"
+                "3. **Private Equity Activity**\n"
+                "4. **Supplier Capacity Signals**\n"
+                "5. **SEC Filing Highlights**\n"
+                "6. **Market Movers**\n"
+                "7. **Company Highlights**\n"
+                "8. **Data Center Market Insights**\n\n"
+                "Focus on actionable insights and material information, particularly as it relates to "
+                "data center products and markets. Be concise but comprehensive."
+            )
+            user_content = (
+                f"Below is today's ({target_date.strftime('%B %d, %Y')}) news, financial data, "
+                "SEC filings, and earnings call insights.\n\n"
+                f"# Today's Data\n\n"
+                f"{combined_data}\n"
+                f"{hyperscaler_section}\n"
+                f"{pe_section}\n\n"
+                "---\n\nPlease generate the daily briefing summary:"
+            )
 
         try:
             message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=MODEL_SONNET,
                 max_tokens=3000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_content}]
             )
 
-            # Extract text from response
-            summary = ""
-            for block in message.content:
-                if block.type == "text":
-                    summary += block.text
-
-            return summary
+            return self._extract_text(message)
 
         except Exception as e:
             print(f"Error generating summary: {e}")

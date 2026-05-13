@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .config import Company, config
+from .config import MODEL_HAIKU, Company, config
 from .storage import NewsArticle
 
 
@@ -89,17 +89,19 @@ class GNewsFetcher:
 
         try:
             lang_name = LANGUAGE_NAMES.get(source_lang, source_lang)
-            prompt = f"""Translate the following {lang_name} text to English.
-Provide only the translation, no explanations.
-
-Text: {text}
-
-Translation:"""
 
             message = self.translator.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=MODEL_HAIKU,
                 max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
+                system=[
+                    {
+                        "type": "text",
+                        "text": "You are a translator. Translate the given text to English. "
+                                "Provide only the translation, no explanations.",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": f"Translate from {lang_name}:\n\n{text}"}]
             )
 
             translated = ""

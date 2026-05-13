@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import feedparser
 import requests
 
-from .config import Company, config
+from .config import MODEL_HAIKU, Company, config
 from .storage import NewsArticle
 
 
@@ -190,18 +190,18 @@ class RSSFetcher:
             return text
 
         try:
-            # Use Claude for translation
-            prompt = f"""Translate the following {source_lang} text to English.
-Provide only the translation, no explanations.
-
-Text: {text}
-
-Translation:"""
-
             message = self.translator.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=MODEL_HAIKU,
                 max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
+                system=[
+                    {
+                        "type": "text",
+                        "text": "You are a translator. Translate the given text to English. "
+                                "Provide only the translation, no explanations.",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": f"Translate from {source_lang}:\n\n{text}"}]
             )
 
             translated = ""

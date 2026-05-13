@@ -1611,6 +1611,76 @@ class Storage:
         conn.close()
         return rows
 
+    def get_id_by_url(self, table: str, url: str) -> Optional[int]:
+        """Look up a row ID by URL in the given table.
+
+        Args:
+            table: Table name (must be an allowed table).
+            url: The URL to look up.
+
+        Returns:
+            The row ID, or None if not found.
+        """
+        allowed = ("hyperscaler_announcements", "pe_datacenter_announcements")
+        if table not in allowed:
+            raise ValueError(f"Invalid table: {table}")
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT id FROM {table} WHERE url = ?", (url,))
+        row = cursor.fetchone()
+        conn.close()
+        return row["id"] if row else None
+
+    def update_sec_filing_summary(
+        self, accession_number: str, content_summary: str
+    ):
+        """Update the content_summary for an SEC filing by accession number."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE sec_filings SET content_summary = ? WHERE accession_number = ?",
+            (content_summary, accession_number)
+        )
+        conn.commit()
+        conn.close()
+
+    def update_transcript_summary(
+        self, company_id: int, quarter: str, content_summary: str
+    ):
+        """Update the content_summary for a transcript by company_id + quarter."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE earnings_transcripts SET content_summary = ? "
+            "WHERE company_id = ? AND quarter = ?",
+            (content_summary, company_id, quarter)
+        )
+        conn.commit()
+        conn.close()
+
+    def update_hyperscaler_summary(self, url: str, content_summary: str):
+        """Update the content_summary for a hyperscaler announcement by URL."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE hyperscaler_announcements SET content_summary = ? WHERE url = ?",
+            (content_summary, url)
+        )
+        conn.commit()
+        conn.close()
+
+    def update_pe_summary(self, url: str, content_summary: str):
+        """Update the content_summary for a PE announcement by URL."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE pe_datacenter_announcements SET content_summary = ? WHERE url = ?",
+            (content_summary, url)
+        )
+        conn.commit()
+        conn.close()
+
     def get_mw_capacity_summary(self) -> list[dict]:
         """Get aggregated MW capacity by source type and target year.
 
