@@ -31,11 +31,210 @@ from .gnews_fetcher import GNewsFetcher
 from .hyperscaler_fetcher import HyperscalerFetcher
 from .news_fetcher import NewsFetcher
 from .pe_datacenter_fetcher import PEDatacenterFetcher
+from .ppt_generator import SeasonalPPTGenerator
 from .rss_fetcher import RSSFetcher
 from .sec_fetcher import SECFetcher
 from .storage import DailySummary, PEDatacenterAnnouncement, Storage
 from .summarizer import Summarizer
 from .transcript_fetcher import TranscriptFetcher
+
+
+def _get_public_company_names() -> list[str]:
+    """Get names of all public companies (those with tickers)."""
+    return [c.name for c in COMPANIES if c.ticker]
+
+
+def _check_season_completeness(storage, today):
+    """Check if any active earnings season should be marked complete."""
+    public_companies = _get_public_company_names()
+
+    # Check all seasons that aren't yet complete
+    conn = storage._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT quarter FROM earnings_seasons WHERE season_complete = FALSE"
+    )
+    active_quarters = [row["quarter"] for row in cursor.fetchall()]
+    conn.close()
+
+    for quarter in active_quarters:
+        season = storage.get_or_create_earnings_season(quarter)
+
+        if not season.companies_reported:
+            continue
+
+        # Check 1: All public companies have reported
+        reported_set = set(season.companies_reported)
+        public_set = set(public_companies)
+        all_reported = public_set.issubset(reported_set)
+
+        # Check 2: 10+ days since last report (handles companies whose
+        # transcripts aren't available via the API)
+        days_since_last = None
+        if season.last_report_date:
+            days_since_last = (today - season.last_report_date).days
+
+        if all_reported:
+            print(f"  Earnings season {quarter}: ALL public companies have reported")
+            storage.mark_season_complete(quarter)
+        elif days_since_last is not None and days_since_last >= 10:
+            reported_count = len(reported_set & public_set)
+            print(f"  Earnings season {quarter}: {reported_count}/{len(public_set)} "
+                  f"companies reported, {days_since_last} days since last report - marking complete")
+            storage.mark_season_complete(quarter)
+
+
+def _generate_seasonal_ppt_summary(
+    storage, summarizer, email_sender, season, today, dry_run
+):
+    """Generate and send the seasonal PPT summary for a complete earnings season."""
+    quarter = season.quarter
+    print(f"\n  === Generating {quarter} Earnings Season PPT Summary ===")
+
+    # Gather all season data
+    # 1. Get all transcripts for the quarter
+    all_transcripts = storage.get_transcripts_for_quarter(quarter)
+    transcripts_by_company = {}
+    for t in all_transcripts:
+        company_db = None
+        # Look up company name from company_id
+        for company in COMPANIES:
+            db_entry = storage.get_company_by_name(company.name)
+            if db_entry and db_entry["id"] == t.company_id:
+                company_db = company
+                break
+        if company_db:
+            if company_db.name not in transcripts_by_company:
+                transcripts_by_company[company_db.name] = []
+            transcripts_by_company[company_db.name].append(t)
+
+    # 2. Get financial snapshots at season start and end
+    snapshots_start = {}
+    snapshots_end = {}
+    market_data = []
+
+    for company in COMPANIES:
+        if not company.ticker:
+            continue
+        company_db = storage.get_company_by_name(company.name)
+        if not company_db:
+            continue
+
+        start_snap = None
+        end_snap = None
+        if season.first_report_date:
+            start_snap = storage.get_financial_snapshot_nearest(
+                company_db["id"], season.first_report_date
+            )
+        if season.last_report_date:
+            end_snap = storage.get_financial_snapshot_nearest(
+                company_db["id"], season.last_report_date
+            )
+
+        snapshots_start[company.name] = start_snap
+        snapshots_end[company.name] = end_snap
+
+        # Build market data for the table
+        start_price = start_snap.price if start_snap else None
+        end_price = end_snap.price if end_snap else None
+        change = None
+        if start_price and end_price:
+            change = ((end_price - start_price) / start_price) * 100
+
+        market_data.append({
+            "company": company.name,
+            "ticker": company.ticker,
+            "start_price": start_price,
+            "end_price": end_price,
+            "change_percent": change
+        })
+
+    # 3. Get news, SEC filings, hyperscaler, and PE data from the season date range
+    articles_by_company = {}
+    filings_by_company = {}
+
+    if season.first_report_date and season.last_report_date:
+        for company in COMPANIES:
+            company_db = storage.get_company_by_name(company.name)
+            if not company_db:
+                continue
+            articles_by_company[company.name] = storage.get_articles_in_range(
+                company_db["id"], season.first_report_date, season.last_report_date
+            )
+            filings_by_company[company.name] = storage.get_sec_filings_in_range(
+                company_db["id"], season.first_report_date, season.last_report_date
+            )
+
+        hyperscaler_announcements = storage.get_hyperscaler_announcements_in_range(
+            season.first_report_date, season.last_report_date
+        )
+        pe_announcements = storage.get_pe_announcements_in_range(
+            season.first_report_date, season.last_report_date
+        )
+    else:
+        hyperscaler_announcements = []
+        pe_announcements = []
+
+    # 4. Generate AI seasonal summary
+    print(f"  Generating AI seasonal summary for {quarter}...")
+    seasonal_analysis = summarizer.generate_seasonal_summary(
+        quarter=quarter,
+        companies=COMPANIES,
+        transcripts_by_company=transcripts_by_company,
+        filings_by_company=filings_by_company,
+        articles_by_company=articles_by_company,
+        snapshots_start=snapshots_start,
+        snapshots_end=snapshots_end,
+        hyperscaler_announcements=hyperscaler_announcements,
+        pe_announcements=pe_announcements
+    )
+    print("  AI seasonal summary generated")
+
+    # 5. Build season_data for PPT generator
+    season_data = {
+        "first_report_date": season.first_report_date,
+        "last_report_date": season.last_report_date,
+        "executive_summary": seasonal_analysis.get("executive_summary", ""),
+        "sector_themes": seasonal_analysis.get("sector_themes", ""),
+        "company_highlights": seasonal_analysis.get("company_highlights", {}),
+        "outlook": seasonal_analysis.get("outlook", ""),
+        "market_data": market_data,
+        "hyperscaler_summary": seasonal_analysis.get("hyperscaler_summary", ""),
+        "pe_summary": seasonal_analysis.get("pe_summary", ""),
+        "companies_reported": season.companies_reported,
+    }
+
+    # 6. Generate PPT
+    import os
+    output_dir = os.path.join(
+        os.path.dirname(__file__), "..", "data"
+    )
+    safe_quarter = quarter.replace(" ", "_")
+    pptx_filename = f"{safe_quarter}_earnings_summary.pptx"
+    pptx_path = os.path.join(output_dir, pptx_filename)
+
+    print(f"  Generating PowerPoint: {pptx_filename}...")
+    ppt_gen = SeasonalPPTGenerator()
+    ppt_gen.generate(quarter, season_data, pptx_path)
+    print(f"  PowerPoint saved to {pptx_path}")
+
+    # 7. Send email with attachment
+    if dry_run:
+        print(f"  Dry run - skipping seasonal summary email for {quarter}")
+        print(f"  PPT file available at: {pptx_path}")
+    else:
+        print(f"  Sending {quarter} seasonal summary email...")
+        if email_sender.send_seasonal_summary(
+            quarter=quarter,
+            pptx_path=pptx_path,
+            companies_reported=season.companies_reported,
+            first_date=season.first_report_date,
+            last_date=season.last_report_date
+        ):
+            storage.mark_season_summary_sent(quarter)
+            print(f"  {quarter} seasonal summary sent successfully!")
+        else:
+            print(f"  Failed to send {quarter} seasonal summary email")
 
 
 def run_tracker(dry_run: bool = False) -> bool:
@@ -252,6 +451,44 @@ def run_tracker(dry_run: bool = False) -> bool:
 
     print(f"  Processed {total_transcripts} new earnings transcripts")
 
+    # Update earnings season tracking for any new transcripts
+    print("  Updating earnings season tracking...")
+    for company_name, transcripts in transcripts_by_company.items():
+        for transcript in transcripts:
+            if transcript.quarter and transcript.transcript_date:
+                storage.update_earnings_season_report(
+                    transcript.quarter,
+                    company_name,
+                    transcript.transcript_date
+                )
+
+    # Also check existing transcripts in DB for season tracking
+    # This ensures season tracking catches up if transcripts were saved on previous runs
+    for company in COMPANIES:
+        if not company.ticker:
+            continue
+        company_db = storage.get_company_by_name(company.name)
+        if not company_db:
+            continue
+        # Check recent transcripts (last 2 quarters worth)
+        db_transcripts = storage.get_transcripts_in_range(
+            company_db["id"],
+            today - timedelta(days=180),
+            today
+        )
+        for transcript in db_transcripts:
+            if transcript.quarter and transcript.transcript_date:
+                storage.update_earnings_season_report(
+                    transcript.quarter,
+                    company.name,
+                    transcript.transcript_date
+                )
+
+    # Check if any earnings season is complete
+    # A season is complete when all public companies have reported
+    # OR when 10+ days have passed since the last report
+    _check_season_completeness(storage, today)
+
     # Fetch hyperscaler announcements
     print("\n[9/14] Fetching hyperscaler announcements...")
     hyperscaler_announcements = hyperscaler_fetcher.fetch_announcements(hours_back=72)
@@ -260,13 +497,29 @@ def run_tracker(dry_run: bool = False) -> bool:
     total_announcements = 0
     for announcement in hyperscaler_announcements:
         print(f"  Analyzing {announcement.hyperscaler} announcement...")
-        announcement.content_summary = summarizer.analyze_hyperscaler_announcement(
-            announcement
-        )
+        analysis = summarizer.analyze_hyperscaler_announcement(announcement)
+        announcement.content_summary = analysis["summary"]
 
         # Save to database
         if storage.save_hyperscaler_announcement(announcement):
             total_announcements += 1
+            # Get the saved announcement's ID and store MW data
+            # The announcement was just inserted, get its ID by URL lookup
+            conn = storage._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM hyperscaler_announcements WHERE url = ?",
+                (announcement.url,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row and (analysis["capacity_mw"] is not None or analysis["target_year"] is not None):
+                storage.save_announcement_mw_data(
+                    "hyperscaler_announcements",
+                    row["id"],
+                    analysis["capacity_mw"],
+                    analysis["target_year"]
+                )
 
     print(f"  Processed {total_announcements} new hyperscaler announcements")
 
@@ -278,6 +531,7 @@ def run_tracker(dry_run: bool = False) -> bool:
     total_pe_announcements = 0
     for announcement in pe_announcements:
         print(f"  Analyzing {announcement.pe_firm} announcement...")
+        analysis = summarizer.analyze_pe_announcement(announcement)
         # Convert to storage dataclass
         pe_storage_announcement = PEDatacenterAnnouncement(
             id=None,
@@ -286,14 +540,48 @@ def run_tracker(dry_run: bool = False) -> bool:
             description=announcement.description,
             url=announcement.url,
             published_at=announcement.published_at,
-            content_summary=summarizer.analyze_pe_announcement(announcement)
+            content_summary=analysis["summary"]
         )
 
         # Save to database
         if storage.save_pe_announcement(pe_storage_announcement):
             total_pe_announcements += 1
+            # Get the saved announcement's ID and store MW data
+            conn = storage._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM pe_datacenter_announcements WHERE url = ?",
+                (announcement.url,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row and (analysis["capacity_mw"] is not None or analysis["target_year"] is not None):
+                storage.save_announcement_mw_data(
+                    "pe_datacenter_announcements",
+                    row["id"],
+                    analysis["capacity_mw"],
+                    analysis["target_year"]
+                )
 
     print(f"  Processed {total_pe_announcements} new PE data center announcements")
+
+    # Backfill MW capacity data for existing announcements missing it
+    for table_name, label in [
+        ("hyperscaler_announcements", "hyperscaler"),
+        ("pe_datacenter_announcements", "PE"),
+    ]:
+        backfill_rows = storage.get_announcements_for_backfill(table_name)
+        if backfill_rows:
+            print(f"  Backfilling MW data for {len(backfill_rows)} {label} announcements...")
+            for row in backfill_rows:
+                extracted = summarizer.extract_mw_from_summary(row["content_summary"])
+                storage.save_announcement_mw_data(
+                    table_name,
+                    row["id"],
+                    extracted["capacity_mw"],
+                    extracted["target_year"]
+                )
+            print(f"  {label} MW backfill complete")
 
     # Fetch upcoming events
     print("\n[11/14] Fetching upcoming events...")
@@ -408,13 +696,17 @@ def run_tracker(dry_run: bool = False) -> bool:
     print(summary_text[:500] + "..." if len(summary_text) > 500 else summary_text)
     print("-" * 40)
 
+    # Query MW capacity data for the email matrix
+    mw_data = storage.get_mw_capacity_summary()
+
     # Send email
+    email_sender = EmailSender()
+
     if dry_run:
         print("\n[14/14] Dry run mode - skipping email")
     else:
         email_type = "weekly" if is_weekly_edition else "daily"
         print(f"\n[14/14] Sending {email_type} email digest...")
-        email_sender = EmailSender()
         if email_sender.send_daily_digest(
             summary_text,
             COMPANIES,
@@ -427,7 +719,8 @@ def run_tracker(dry_run: bool = False) -> bool:
             today,
             is_weekly=is_weekly_edition,
             week_start_date=get_week_start_date() if is_weekly_edition else None,
-            pe_announcements=email_pe_announcements
+            pe_announcements=email_pe_announcements,
+            mw_data=mw_data
         ):
             storage.mark_summary_email_sent(today)
 
@@ -454,6 +747,19 @@ def run_tracker(dry_run: bool = False) -> bool:
         else:
             print("  Failed to send email")
             return False
+
+    # Check for pending seasonal earnings summary (on Fridays)
+    if is_weekly_edition:
+        pending_season = storage.get_pending_season_summary()
+        if pending_season:
+            print(f"\n  Earnings season {pending_season.quarter} is complete - "
+                  f"{len(pending_season.companies_reported)} companies reported")
+            _generate_seasonal_ppt_summary(
+                storage, summarizer, email_sender,
+                pending_season, today, dry_run
+            )
+        else:
+            print("\n  No pending seasonal summaries to generate")
 
     print("\n" + "=" * 60)
     print("Tracking complete!")

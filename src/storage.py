@@ -101,6 +101,19 @@ class PEDatacenterAnnouncement:
     fetched_at: Optional[datetime] = None
 
 
+@dataclass
+class EarningsSeason:
+    """Represents an earnings season tracking record."""
+    id: Optional[int]
+    quarter: str  # e.g., "Q1 2025"
+    first_report_date: Optional[date]
+    last_report_date: Optional[date]
+    companies_reported: list  # list of company names
+    season_complete: bool = False
+    summary_sent: bool = False
+    created_at: Optional[datetime] = None
+
+
 class Storage:
     """SQLite storage handler."""
 
@@ -219,7 +232,19 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_transcripts_company ON earnings_transcripts(company_id);
             CREATE INDEX IF NOT EXISTS idx_transcripts_date ON earnings_transcripts(transcript_date);
             CREATE INDEX IF NOT EXISTS idx_hyperscaler_published ON hyperscaler_announcements(published_at);
+            CREATE TABLE IF NOT EXISTS earnings_seasons (
+                id INTEGER PRIMARY KEY,
+                quarter TEXT UNIQUE NOT NULL,
+                first_report_date DATE,
+                last_report_date DATE,
+                companies_reported TEXT DEFAULT '[]',
+                season_complete BOOLEAN DEFAULT FALSE,
+                summary_sent BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_pe_datacenter_published ON pe_datacenter_announcements(published_at);
+            CREATE INDEX IF NOT EXISTS idx_earnings_seasons_quarter ON earnings_seasons(quarter);
         """)
 
         conn.commit()
@@ -264,6 +289,21 @@ class Storage:
             """)
             conn.commit()
             print("  PE datacenter migration complete")
+
+        # Check if capacity_mw column exists in hyperscaler_announcements
+        cursor.execute("PRAGMA table_info(hyperscaler_announcements)")
+        hs_columns = [row["name"] for row in cursor.fetchall()]
+
+        if "capacity_mw" not in hs_columns:
+            print("  Migrating database: adding capacity_mw and target_year columns...")
+            cursor.executescript("""
+                ALTER TABLE hyperscaler_announcements ADD COLUMN capacity_mw REAL DEFAULT NULL;
+                ALTER TABLE hyperscaler_announcements ADD COLUMN target_year INTEGER DEFAULT NULL;
+                ALTER TABLE pe_datacenter_announcements ADD COLUMN capacity_mw REAL DEFAULT NULL;
+                ALTER TABLE pe_datacenter_announcements ADD COLUMN target_year INTEGER DEFAULT NULL;
+            """)
+            conn.commit()
+            print("  MW capacity columns added")
 
         conn.close()
 
@@ -1289,3 +1329,332 @@ class Storage:
 
         conn.close()
         return announcements
+
+    # ========== Earnings Season Tracking Methods ==========
+
+    def get_or_create_earnings_season(self, quarter: str) -> EarningsSeason:
+        """Get or create an earnings season record for a quarter."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT * FROM earnings_seasons WHERE quarter = ?",
+            (quarter,)
+        )
+        row = cursor.fetchone()
+
+        if row:
+            conn.close()
+            return EarningsSeason(
+                id=row["id"],
+                quarter=row["quarter"],
+                first_report_date=date.fromisoformat(row["first_report_date"])
+                    if row["first_report_date"] else None,
+                last_report_date=date.fromisoformat(row["last_report_date"])
+                    if row["last_report_date"] else None,
+                companies_reported=json.loads(row["companies_reported"])
+                    if row["companies_reported"] else [],
+                season_complete=bool(row["season_complete"]),
+                summary_sent=bool(row["summary_sent"]),
+                created_at=datetime.fromisoformat(row["created_at"])
+                    if row["created_at"] else None
+            )
+
+        # Create new season record
+        cursor.execute(
+            """
+            INSERT INTO earnings_seasons (quarter, companies_reported)
+            VALUES (?, '[]')
+            """,
+            (quarter,)
+        )
+        season_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        return EarningsSeason(
+            id=season_id,
+            quarter=quarter,
+            first_report_date=None,
+            last_report_date=None,
+            companies_reported=[],
+            season_complete=False,
+            summary_sent=False
+        )
+
+    def update_earnings_season_report(
+        self,
+        quarter: str,
+        company_name: str,
+        report_date: date
+    ):
+        """Mark a company as having reported for a given quarter."""
+        season = self.get_or_create_earnings_season(quarter)
+
+        if company_name in season.companies_reported:
+            return  # Already recorded
+
+        companies = season.companies_reported + [company_name]
+
+        # Update first/last report dates
+        first_date = season.first_report_date
+        last_date = season.last_report_date
+
+        if first_date is None or report_date < first_date:
+            first_date = report_date
+        if last_date is None or report_date > last_date:
+            last_date = report_date
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE earnings_seasons
+            SET companies_reported = ?,
+                first_report_date = ?,
+                last_report_date = ?
+            WHERE quarter = ?
+            """,
+            (
+                json.dumps(companies),
+                first_date.isoformat(),
+                last_date.isoformat(),
+                quarter
+            )
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_season_complete(self, quarter: str):
+        """Set the season_complete flag for a quarter."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE earnings_seasons SET season_complete = TRUE WHERE quarter = ?",
+            (quarter,)
+        )
+        conn.commit()
+        conn.close()
+
+    def mark_season_summary_sent(self, quarter: str):
+        """Set the summary_sent flag for a quarter."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE earnings_seasons SET summary_sent = TRUE WHERE quarter = ?",
+            (quarter,)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_pending_season_summary(self) -> Optional[EarningsSeason]:
+        """Get a season that is complete but summary not yet sent."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM earnings_seasons
+            WHERE season_complete = TRUE AND summary_sent = FALSE
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        return EarningsSeason(
+            id=row["id"],
+            quarter=row["quarter"],
+            first_report_date=date.fromisoformat(row["first_report_date"])
+                if row["first_report_date"] else None,
+            last_report_date=date.fromisoformat(row["last_report_date"])
+                if row["last_report_date"] else None,
+            companies_reported=json.loads(row["companies_reported"])
+                if row["companies_reported"] else [],
+            season_complete=bool(row["season_complete"]),
+            summary_sent=bool(row["summary_sent"]),
+            created_at=datetime.fromisoformat(row["created_at"])
+                if row["created_at"] else None
+        )
+
+    def get_transcripts_for_quarter(self, quarter: str) -> list[EarningsTranscript]:
+        """Get all earnings transcripts for a specific quarter."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM earnings_transcripts
+            WHERE quarter = ?
+            ORDER BY transcript_date ASC
+            """,
+            (quarter,)
+        )
+
+        transcripts = []
+        for row in cursor.fetchall():
+            transcripts.append(EarningsTranscript(
+                id=row["id"],
+                company_id=row["company_id"],
+                ticker=row["ticker"],
+                quarter=row["quarter"],
+                transcript_date=date.fromisoformat(row["transcript_date"])
+                    if row["transcript_date"] else None,
+                transcript_text=row["transcript_text"],
+                content_summary=row["content_summary"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"])
+                    if row["fetched_at"] else None
+            ))
+
+        conn.close()
+        return transcripts
+
+    def get_financial_snapshot_nearest(
+        self,
+        company_id: int,
+        target_date: date
+    ) -> Optional[FinancialSnapshot]:
+        """Get the financial snapshot closest to a target date."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM financial_snapshots
+            WHERE company_id = ?
+            ORDER BY ABS(julianday(date) - julianday(?))
+            LIMIT 1
+            """,
+            (company_id, target_date.isoformat())
+        )
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        return FinancialSnapshot(
+            id=row["id"],
+            company_id=row["company_id"],
+            date=date.fromisoformat(row["date"]),
+            price=row["price"],
+            change_percent=row["change_percent"],
+            volume=row["volume"],
+            market_cap=row["market_cap"],
+            high_52w=row["high_52w"],
+            low_52w=row["low_52w"],
+            raw_data=json.loads(row["raw_data"]) if row["raw_data"] else None
+        )
+
+    # ========== MW Capacity Methods ==========
+
+    def save_announcement_mw_data(
+        self,
+        table: str,
+        announcement_id: int,
+        capacity_mw: Optional[float],
+        target_year: Optional[int]
+    ):
+        """Update MW capacity fields for an existing announcement.
+
+        Args:
+            table: Either 'hyperscaler_announcements' or 'pe_datacenter_announcements'.
+            announcement_id: The row ID.
+            capacity_mw: MW capacity (or None).
+            target_year: Target operational year (or None).
+        """
+        if table not in ("hyperscaler_announcements", "pe_datacenter_announcements"):
+            raise ValueError(f"Invalid table: {table}")
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            UPDATE {table}
+            SET capacity_mw = ?, target_year = ?
+            WHERE id = ?
+            """,
+            (capacity_mw, target_year, announcement_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_announcements_for_backfill(self, table: str) -> list[dict]:
+        """Get announcements that have a content_summary but no capacity_mw yet.
+
+        Args:
+            table: Either 'hyperscaler_announcements' or 'pe_datacenter_announcements'.
+
+        Returns:
+            List of dicts with id and content_summary.
+        """
+        if table not in ("hyperscaler_announcements", "pe_datacenter_announcements"):
+            raise ValueError(f"Invalid table: {table}")
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT id, content_summary FROM {table}
+            WHERE capacity_mw IS NULL
+              AND content_summary IS NOT NULL
+              AND content_summary != ''
+            """
+        )
+        rows = [{"id": row["id"], "content_summary": row["content_summary"]}
+                for row in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def get_mw_capacity_summary(self) -> list[dict]:
+        """Get aggregated MW capacity by source type and target year.
+
+        Returns:
+            List of dicts: {"source": str, "target_year": int, "total_mw": float}
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        results = []
+
+        # Hyperscaler totals
+        cursor.execute(
+            """
+            SELECT target_year, SUM(capacity_mw) as total_mw
+            FROM hyperscaler_announcements
+            WHERE capacity_mw IS NOT NULL AND target_year IS NOT NULL
+            GROUP BY target_year
+            ORDER BY target_year
+            """
+        )
+        for row in cursor.fetchall():
+            results.append({
+                "source": "Hyperscaler",
+                "target_year": row["target_year"],
+                "total_mw": row["total_mw"]
+            })
+
+        # PE totals
+        cursor.execute(
+            """
+            SELECT target_year, SUM(capacity_mw) as total_mw
+            FROM pe_datacenter_announcements
+            WHERE capacity_mw IS NOT NULL AND target_year IS NOT NULL
+            GROUP BY target_year
+            ORDER BY target_year
+            """
+        )
+        for row in cursor.fetchall():
+            results.append({
+                "source": "Private Equity",
+                "target_year": row["target_year"],
+                "total_mw": row["total_mw"]
+            })
+
+        conn.close()
+        return results

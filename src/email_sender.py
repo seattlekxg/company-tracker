@@ -1,5 +1,6 @@
 """Resend email sending integration."""
 
+import base64
 import os
 from datetime import date
 from typing import Optional
@@ -290,6 +291,100 @@ class EmailSender:
 
         return html
 
+    def _format_mw_capacity_matrix(self, mw_data: list) -> str:
+        """Format MW capacity data as an HTML table by source and target year.
+
+        Args:
+            mw_data: List of dicts with "source", "target_year", "total_mw".
+
+        Returns:
+            HTML string with the capacity matrix table.
+        """
+        if not mw_data:
+            return ""
+
+        # Collect all years and build lookup
+        years = sorted(set(d["target_year"] for d in mw_data))
+        if not years:
+            return ""
+
+        # Build per-source lookup: {source: {year: mw}}
+        source_data = {}
+        for d in mw_data:
+            source = d["source"]
+            if source not in source_data:
+                source_data[source] = {}
+            source_data[source][d["target_year"]] = d["total_mw"]
+
+        # Ensure consistent row order
+        sources = []
+        if "Hyperscaler" in source_data:
+            sources.append("Hyperscaler")
+        if "Private Equity" in source_data:
+            sources.append("Private Equity")
+
+        if not sources:
+            return ""
+
+        # Build header
+        year_headers = "".join(
+            f'<th style="padding: 12px; text-align: right; border: 1px solid #e2e8f0;">{y}</th>'
+            for y in years
+        )
+
+        html = f'''
+        <h2>Announced Datacenter Capacity (MW)</h2>
+        <p style="color: #666; margin-bottom: 15px;">Cumulative MW of datacenter capacity announced, by expected operational year</p>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+            <thead>
+                <tr style="background-color: #1a365d; color: white;">
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Source</th>
+                    {year_headers}
+                </tr>
+            </thead>
+            <tbody>
+        '''
+
+        row_colors = ['#ffffff', '#f7fafc']
+
+        # Data rows
+        for idx, source in enumerate(sources):
+            bg_color = row_colors[idx % 2]
+            cells = ""
+            for y in years:
+                mw = source_data[source].get(y)
+                if mw is not None:
+                    cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0;">{mw:,.0f} MW</td>'
+                else:
+                    cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0; color: #a0aec0;">\u2014</td>'
+
+            html += f'''
+                <tr style="background-color: {bg_color};">
+                    <td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: 600;">{source}</td>
+                    {cells}
+                </tr>
+            '''
+
+        # Total row
+        total_cells = ""
+        for y in years:
+            total = sum(source_data[s].get(y, 0) for s in sources)
+            if total > 0:
+                total_cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0; font-weight: 700;">{total:,.0f} MW</td>'
+            else:
+                total_cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0; color: #a0aec0;">\u2014</td>'
+
+        html += f'''
+                <tr style="background-color: #edf2f7; font-weight: 700;">
+                    <td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: 700;">Total</td>
+                    {total_cells}
+                </tr>
+            </tbody>
+        </table>
+        '''
+
+        return html
+
     def _markdown_to_html(self, markdown_text: str) -> str:
         """Convert basic markdown to HTML."""
         import re
@@ -346,7 +441,8 @@ class EmailSender:
         target_date: date = None,
         is_weekly: bool = False,
         week_start_date: date = None,
-        pe_announcements: list = None
+        pe_announcements: list = None,
+        mw_data: list = None
     ) -> bool:
         """Send the daily or weekly digest email.
 
@@ -363,6 +459,7 @@ class EmailSender:
             is_weekly: If True, format as weekly summary.
             week_start_date: Start date of the week (for weekly summaries).
             pe_announcements: List of PE data center announcements.
+            mw_data: Aggregated MW capacity data by source and year.
 
         Returns:
             True if email was sent successfully.
@@ -377,6 +474,8 @@ class EmailSender:
             events_by_company = {}
         if pe_announcements is None:
             pe_announcements = []
+        if mw_data is None:
+            mw_data = []
 
         template = self._load_template()
 
@@ -400,6 +499,11 @@ class EmailSender:
                 company, articles, snapshot, filings, transcripts
             )
 
+        # Format MW capacity matrix
+        mw_matrix = ""
+        if mw_data:
+            mw_matrix = self._format_mw_capacity_matrix(mw_data)
+
         # Format events matrix
         events_matrix = ""
         if events_by_company:
@@ -419,7 +523,7 @@ class EmailSender:
 
         html_content = html_content.replace(
             "{{COMPANY_DETAILS}}",
-            f"{hyperscaler_section}{pe_section}<h2>Company Details</h2>{company_details}{events_matrix}"
+            f"{hyperscaler_section}{pe_section}{mw_matrix}<h2>Company Details</h2>{company_details}{events_matrix}"
         )
 
         try:
@@ -433,4 +537,120 @@ class EmailSender:
             return True
         except Exception as e:
             print(f"Error sending email: {e}")
+            return False
+
+    def send_seasonal_summary(
+        self,
+        quarter: str,
+        pptx_path: str,
+        companies_reported: list[str],
+        first_date: Optional[date] = None,
+        last_date: Optional[date] = None
+    ) -> bool:
+        """Send the seasonal earnings summary email with PPT attachment.
+
+        Args:
+            quarter: e.g., "Q1 2025"
+            pptx_path: Path to the generated .pptx file.
+            companies_reported: List of company names that reported.
+            first_date: First report date in the season.
+            last_date: Last report date in the season.
+
+        Returns:
+            True if email was sent successfully.
+        """
+        # Build date range string
+        if first_date and last_date:
+            date_range = (
+                f"{first_date.strftime('%B %d')} - "
+                f"{last_date.strftime('%B %d, %Y')}"
+            )
+        else:
+            date_range = quarter
+
+        # Build company list HTML
+        companies_html = ""
+        for name in sorted(companies_reported):
+            companies_html += f"<li>{name}</li>\n"
+
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background: #1a365d; color: white; padding: 20px; border-radius: 8px 8px 0 0; }}
+        .content {{ background: #f7fafc; padding: 20px; border: 1px solid #e2e8f0; }}
+        .footer {{ text-align: center; color: #718096; font-size: 12px; padding: 20px; }}
+        h1 {{ margin: 0; font-size: 22px; }}
+        h2 {{ color: #2d3748; border-bottom: 2px solid #3182ce; padding-bottom: 5px; }}
+        a {{ color: #3182ce; }}
+        .highlight {{ background: #ebf8ff; padding: 15px; border-radius: 8px; border-left: 4px solid #3182ce; margin: 15px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{quarter} Earnings Season Summary</h1>
+            <p>{date_range}</p>
+        </div>
+        <div class="content">
+            <div class="highlight">
+                <p><strong>Attached:</strong> The {quarter} Earnings Season Summary presentation
+                with comprehensive analysis of all earnings reports, market performance,
+                sector themes, and outlook.</p>
+            </div>
+
+            <h2>Companies Included ({len(companies_reported)})</h2>
+            <ul>
+                {companies_html}
+            </ul>
+
+            <p>Open the attached PowerPoint file for the full analysis including:</p>
+            <ul>
+                <li>Executive Summary</li>
+                <li>Market Performance (stock price comparison)</li>
+                <li>Sector Themes from earnings calls</li>
+                <li>Per-company earnings highlights</li>
+                <li>Hyperscaler activity summary</li>
+                <li>Private Equity activity summary</li>
+                <li>Forward guidance and outlook</li>
+            </ul>
+        </div>
+        <div class="footer">
+            <p>This report was generated automatically by Company Tracker.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        subject = f"{quarter} Earnings Season Summary - {date_range}"
+
+        # Read and encode the PPT file
+        try:
+            with open(pptx_path, "rb") as f:
+                file_content = f.read()
+
+            filename = os.path.basename(pptx_path)
+            encoded_content = base64.b64encode(file_content).decode("utf-8")
+
+            response = resend.Emails.send({
+                "from": self.from_email,
+                "to": [self.to_email],
+                "subject": subject,
+                "html": html_content,
+                "attachments": [
+                    {
+                        "filename": filename,
+                        "content": encoded_content,
+                    }
+                ]
+            })
+            print(f"Seasonal summary email sent successfully. ID: {response['id']}")
+            return True
+
+        except Exception as e:
+            print(f"Error sending seasonal summary email: {e}")
             return False
