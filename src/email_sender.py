@@ -292,10 +292,10 @@ class EmailSender:
         return html
 
     def _format_mw_capacity_matrix(self, mw_data: list) -> str:
-        """Format MW capacity data as an HTML table by source and target year.
+        """Format MW capacity data as an HTML table with per-entity rows.
 
         Args:
-            mw_data: List of dicts with "source", "target_year", "total_mw".
+            mw_data: List of dicts with "source", "entity", "target_year", "total_mw".
 
         Returns:
             HTML string with the capacity matrix table.
@@ -303,30 +303,24 @@ class EmailSender:
         if not mw_data:
             return ""
 
-        # Collect all years and build lookup
-        # None target_year means "Unspecified" — sort those to the end
+        # Collect all years; None means "Unspecified" — sort to end
         raw_years = set(d["target_year"] for d in mw_data)
         known_years = sorted(y for y in raw_years if y is not None)
         years = known_years + ([None] if None in raw_years else [])
         if not years:
             return ""
 
-        # Build per-source lookup: {source: {year: mw}}
-        source_data = {}
+        # Group by source type, then by entity
+        # {source: {entity: {year: mw}}}
+        grouped = {}
         for d in mw_data:
             source = d["source"]
-            if source not in source_data:
-                source_data[source] = {}
-            source_data[source][d["target_year"]] = d["total_mw"]
+            entity = d["entity"]
+            grouped.setdefault(source, {}).setdefault(entity, {})[d["target_year"]] = d["total_mw"]
 
-        # Ensure consistent row order
-        sources = []
-        if "Hyperscaler" in source_data:
-            sources.append("Hyperscaler")
-        if "Private Equity" in source_data:
-            sources.append("Private Equity")
-
-        if not sources:
+        # Ordered source types
+        source_order = [s for s in ("Hyperscaler", "Private Equity") if s in grouped]
+        if not source_order:
             return ""
 
         # Build header
@@ -338,7 +332,7 @@ class EmailSender:
 
         html = f'''
         <h2>Announced Datacenter Capacity (MW)</h2>
-        <p style="color: #666; margin-bottom: 15px;">Cumulative MW of datacenter capacity announced, by expected operational year</p>
+        <p style="color: #666; margin-bottom: 15px;">MW of datacenter capacity from tracked announcements, by expected operational year</p>
         <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
             <thead>
                 <tr style="background-color: #1a365d; color: white;">
@@ -350,29 +344,52 @@ class EmailSender:
         '''
 
         row_colors = ['#ffffff', '#f7fafc']
+        row_idx = 0
+        all_entities = {}  # entity -> {year: mw} for totals
 
-        # Data rows
-        for idx, source in enumerate(sources):
-            bg_color = row_colors[idx % 2]
-            cells = ""
-            for y in years:
-                mw = source_data[source].get(y)
-                if mw is not None:
-                    cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0;">{mw:,.0f} MW</td>'
-                else:
-                    cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0; color: #a0aec0;">\u2014</td>'
+        for source in source_order:
+            entities = grouped[source]
+            # Sort entities by total MW descending
+            sorted_entities = sorted(
+                entities.items(),
+                key=lambda kv: sum(kv[1].values()),
+                reverse=True
+            )
 
+            # Section header row
             html += f'''
-                <tr style="background-color: {bg_color};">
-                    <td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: 600;">{source}</td>
-                    {cells}
+                <tr style="background-color: #2d3748; color: white;">
+                    <td colspan="{1 + len(years)}" style="padding: 8px 10px; border: 1px solid #e2e8f0; font-weight: 600; font-size: 0.9em;">{source}</td>
                 </tr>
             '''
+
+            for entity, year_data in sorted_entities:
+                bg_color = row_colors[row_idx % 2]
+                row_idx += 1
+
+                cells = ""
+                for y in years:
+                    mw = year_data.get(y)
+                    if mw is not None:
+                        cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0;">{mw:,.0f} MW</td>'
+                    else:
+                        cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0; color: #a0aec0;">\u2014</td>'
+
+                    # Accumulate for total row
+                    all_entities.setdefault(y, 0)
+                    all_entities[y] += mw or 0
+
+                html += f'''
+                <tr style="background-color: {bg_color};">
+                    <td style="padding: 10px 10px 10px 20px; border: 1px solid #e2e8f0;">{entity}</td>
+                    {cells}
+                </tr>
+                '''
 
         # Total row
         total_cells = ""
         for y in years:
-            total = sum(source_data[s].get(y, 0) for s in sources)
+            total = all_entities.get(y, 0)
             if total > 0:
                 total_cells += f'<td style="padding: 10px; text-align: right; border: 1px solid #e2e8f0; font-weight: 700;">{total:,.0f} MW</td>'
             else:

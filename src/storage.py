@@ -1682,48 +1682,51 @@ class Storage:
         conn.close()
 
     def get_mw_capacity_summary(self) -> list[dict]:
-        """Get aggregated MW capacity by source type and target year.
+        """Get MW capacity broken out by announcing entity and target year.
 
         Items with no target year are grouped under target_year=None.
 
         Returns:
-            List of dicts: {"source": str, "target_year": int|None, "total_mw": float}
+            List of dicts: {"source": str, "entity": str,
+                            "target_year": int|None, "total_mw": float}
         """
         conn = self._get_connection()
         cursor = conn.cursor()
 
         results = []
 
-        # Hyperscaler totals
+        # Hyperscaler per-entity totals
         cursor.execute(
             """
-            SELECT target_year, SUM(capacity_mw) as total_mw
+            SELECT hyperscaler, target_year, SUM(capacity_mw) as total_mw
             FROM hyperscaler_announcements
             WHERE capacity_mw IS NOT NULL AND capacity_mw > 0
-            GROUP BY target_year
-            ORDER BY target_year
+            GROUP BY hyperscaler, target_year
+            ORDER BY hyperscaler, target_year
             """
         )
         for row in cursor.fetchall():
             results.append({
                 "source": "Hyperscaler",
+                "entity": row["hyperscaler"],
                 "target_year": row["target_year"],
                 "total_mw": row["total_mw"]
             })
 
-        # PE totals
+        # PE per-firm totals
         cursor.execute(
             """
-            SELECT target_year, SUM(capacity_mw) as total_mw
+            SELECT pe_firm, target_year, SUM(capacity_mw) as total_mw
             FROM pe_datacenter_announcements
             WHERE capacity_mw IS NOT NULL AND capacity_mw > 0
-            GROUP BY target_year
-            ORDER BY target_year
+            GROUP BY pe_firm, target_year
+            ORDER BY pe_firm, target_year
             """
         )
         for row in cursor.fetchall():
             results.append({
                 "source": "Private Equity",
+                "entity": row["pe_firm"],
                 "target_year": row["target_year"],
                 "total_mw": row["total_mw"]
             })
