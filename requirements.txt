@@ -10,5 +10,8 @@ resend>=0.7.0
 # RSS Feed Parsing
 feedparser>=6.0.0
 
+# PowerPoint generation
+python-pptx>=0.6.21
+
 # Utilities
 python-dotenv>=1.0.0
